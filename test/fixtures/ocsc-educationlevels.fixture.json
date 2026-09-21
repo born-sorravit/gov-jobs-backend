@@ -1,0 +1,14 @@
+[
+	{ "id": 1, "educationLevel": "ปวช." },
+	{ "id": 2, "educationLevel": "ปวท." },
+	{ "id": 3, "educationLevel": "ปวส." },
+	{ "id": 4, "educationLevel": "ประกาศนียบัตร" },
+	{ "id": 5, "educationLevel": "ประกาศนียบัตรบัณฑิต" },
+	{ "id": 6, "educationLevel": "ประกาศนียบัตรบัณฑิตชั้นสูง" },
+	{ "id": 7, "educationLevel": "อนุปริญญา" },
+	{ "id": 8, "educationLevel": "ป.ตรี" },
+	{ "id": 9, "educationLevel": "ป.โท" },
+	{ "id": 10, "educationLevel": "ป.เอก" },
+	{ "id": 11, "educationLevel": "วุฒิบัตร/หนังสือ" },
+	{ "id": 99, "educationLevel": "วุฒิอื่น ๆ" }
+]

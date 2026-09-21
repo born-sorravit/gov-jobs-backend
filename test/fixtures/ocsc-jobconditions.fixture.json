@@ -1,0 +1,6 @@
+[
+	{ "id": 1, "jobCondition": "ไม่มีเงื่อนไข" },
+	{ "id": 2, "jobCondition": "ไม่รับโอน" },
+	{ "id": 3, "jobCondition": "รับโอนในอัตราเงินเดือนขั้นต่ำ" },
+	{ "id": 99, "jobCondition": "อื่น ๆ" }
+]

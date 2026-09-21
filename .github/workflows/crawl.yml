@@ -1,0 +1,35 @@
+name: OCSC crawl
+
+# Render's free web service sleeps when idle, so an in-process cron inside the API simply
+# stops firing. This workflow is the scheduler: the request both triggers the crawl and
+# wakes the instance. GitHub's shortest reliable interval is ~5 minutes and schedules can be
+# delayed under load, which is fine — the crawl is idempotent.
+on:
+  schedule:
+    - cron: "0 */2 * * *" # every two hours
+  workflow_dispatch: # and on demand from the Actions tab
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake the instance
+        # A cold start takes up to a minute; without this the crawl request itself times out.
+        run: |
+          curl -sS --max-time 90 --retry 5 --retry-all-errors --retry-delay 10 \
+            -o /dev/null -w 'healthcheck: %{http_code}\n' \
+            "${{ secrets.API_BASE_URL }}/healthcheck"
+
+      - name: Trigger the crawl
+        run: |
+          response=$(curl -sS --max-time 300 \
+            -X POST \
+            -H "x-internal-api-key: ${{ secrets.INTERNAL_API_KEY }}" \
+            "${{ secrets.API_BASE_URL }}/api/v1/internal/crawler/run")
+          echo "$response"
+          # The endpoint returns 200 with status FAILED when the source was unreachable, so
+          # the workflow has to read the body to know whether to go red.
+          echo "$response" | grep -q '"status":"SUCCESS"' || {
+            echo "::error::crawl did not report SUCCESS"
+            exit 1
+          }

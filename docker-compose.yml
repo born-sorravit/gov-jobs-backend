@@ -1,0 +1,23 @@
+# Postgres only. BullMQ uses the PostgreSQL backend and the cache talks to Upstash over
+# HTTP (or falls back to an in-process Map), so there is no local Redis to run.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: gov-jobs-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: govjobs
+      POSTGRES_PASSWORD: govjobs
+      POSTGRES_DB: govjobs
+    ports:
+      - "5433:5432"
+    volumes:
+      - gov-jobs-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U govjobs"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  gov-jobs-pgdata:

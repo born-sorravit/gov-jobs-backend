@@ -1,0 +1,5 @@
+[
+	{ "id": 1, "jobSelection": "สอบแข่งขัน" },
+	{ "id": 2, "jobSelection": "คัดเลือก" },
+	{ "id": 99, "jobSelection": "อื่น ๆ" }
+]

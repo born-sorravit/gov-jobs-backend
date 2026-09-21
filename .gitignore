@@ -1,0 +1,33 @@
+# compiled output
+/dist
+/node_modules
+/build
+
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS
+.DS_Store
+
+# Tests
+/coverage
+/.nyc_output
+
+# IDEs
+/.idea
+/.vscode
+*.sublime-workspace
+.history
+
+# Env — every variant is ignored; only the checked-in template is not
+.env*
+!.env.example
+
+# TypeScript
+*.tsbuildinfo

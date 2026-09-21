@@ -1,0 +1,142 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"useIgnoreFile": true
+	},
+	"files": {
+		"ignoreUnknown": false,
+		"includes": [
+			"**",
+			"!**/.next",
+			"!**/dist",
+			"!**/docker",
+			"!**/node_modules",
+			"!**/public",
+			"!**/globals.css"
+		]
+	},
+	"formatter": {
+		"enabled": true,
+		"indentStyle": "tab",
+		"lineWidth": 100,
+		"includes": [
+			"**",
+			"!**/.next",
+			"!**/dist",
+			"!**/docker",
+			"!**/node_modules",
+			"!**/public",
+			"!**/globals.css"
+		]
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "none",
+			"correctness": {
+				"noUnusedVariables": {
+					"level": "error",
+					"fix": "safe"
+				},
+				"noUnusedImports": {
+					"level": "warn",
+					"fix": "safe"
+				},
+				"noUndeclaredVariables": "error",
+				"noUnusedFunctionParameters": {
+					"level": "error",
+					"fix": "safe"
+				}
+			},
+			"suspicious": {
+				"noConsole": {
+					"level": "warn",
+					"fix": "unsafe",
+					"options": {
+						"allow": []
+					}
+				},
+				"noCommentText": "error"
+			},
+			"performance": "off",
+			"security": {
+				"noSecrets": "off"
+			},
+			"style": {
+				"useConst": "warn",
+				"noUselessElse": "warn",
+				"useCollapsedIf": "warn",
+				"useCollapsedElseIf": "warn",
+				"useShorthandAssign": "info",
+				"useShorthandFunctionType": "info",
+				"useThrowOnlyError": "info",
+				"useNumericSeparators": "info",
+				"useFilenamingConvention": {
+					"level": "error",
+					"options": {
+						"strictCase": false,
+						"filenameCases": ["kebab-case"]
+					}
+				}
+			}
+		},
+		"includes": [
+			"**",
+			"!**/.next",
+			"!**/dist",
+			"!**/docker",
+			"!**/node_modules",
+			"!**/public",
+			"!**/globals.css"
+		]
+	},
+	"javascript": {
+		"globals": [
+			"describe",
+			"it",
+			"test",
+			"expect",
+			"jest",
+			"beforeEach",
+			"afterEach",
+			"beforeAll",
+			"afterAll"
+		],
+		"formatter": {
+			"quoteStyle": "double",
+			"semicolons": "always",
+			"trailingCommas": "es5",
+			"lineWidth": 85
+		},
+		"parser": {
+			"unsafeParameterDecoratorsEnabled": true
+		}
+	},
+	"json": {
+		"formatter": {
+			"trailingCommas": "none"
+		}
+	},
+	"assist": {
+		"enabled": false,
+		"actions": {
+			"source": {
+				"organizeImports": "on"
+			}
+		}
+	},
+	"overrides": [
+		{
+			"includes": ["src/shared/database/migrations/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"useFilenamingConvention": "off"
+					}
+				}
+			}
+		}
+	]
+}
