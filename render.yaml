@@ -19,7 +19,12 @@ services:
     healthCheckPath: /healthcheck
     autoDeployTrigger: commit
 
-    buildCommand: npm ci && npm run build
+    # `--include=dev` is load-bearing, not tidiness. NODE_ENV=production below is a service
+    # variable, and Render applies those during the build too; npm turns NODE_ENV=production
+    # into `omit=dev`, so a plain `npm ci` skips devDependencies — where @nestjs/cli and
+    # typescript live — and `nest build` dies with "nest: not found". The runtime install is
+    # unaffected either way: typeorm, which the start command shells into, is a dependency.
+    buildCommand: npm ci --include=dev && npm run build
     # migration:run reads ./dist/shared/database/typeorm.config.js, so it has to follow the
     # build. Migrations are idempotent, so running them on every cold start is safe.
     startCommand: npm run migration:run && node dist/main
