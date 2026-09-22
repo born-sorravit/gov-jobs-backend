@@ -103,6 +103,38 @@ describe("normalizeOcscJob", () => {
 			expect(job.knowledge).toBe("ความรู้ส่วนที่หนึ่ง\nความรู้ส่วนที่สอง");
 		});
 
+		it("drops a half that exactly repeats the one before it", () => {
+			// OCSC fills both halves with the same sentence on 34 of the 34 announcements that
+			// use them, so joining blindly prints every requirement twice.
+			const job = normalizeOcscJob(
+				{
+					id: 1,
+					position: "ตำแหน่ง",
+					department: "หน่วยงาน",
+					employeeJobSkill1: "รายละเอียดตามประกาศรับสมัคร",
+					employeeJobSkill2: "รายละเอียดตามประกาศรับสมัคร",
+				},
+				OPTIONS
+			);
+
+			expect(job.skill).toBe("รายละเอียดตามประกาศรับสมัคร");
+		});
+
+		it("keeps both halves when they genuinely differ, in source order", () => {
+			const job = normalizeOcscJob(
+				{
+					id: 1,
+					position: "ตำแหน่ง",
+					department: "หน่วยงาน",
+					employeeJobCompetency1: "สมรรถนะหลัก",
+					employeeJobCompetency2: "สมรรถนะเฉพาะ",
+				},
+				OPTIONS
+			);
+
+			expect(job.competency).toBe("สมรรถนะหลัก\nสมรรถนะเฉพาะ");
+		});
+
 		it("drops an empty half instead of leaving a dangling newline", () => {
 			const job = normalizeOcscJob(
 				{

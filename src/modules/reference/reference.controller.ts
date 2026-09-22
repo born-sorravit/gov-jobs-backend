@@ -1,8 +1,11 @@
+import { Public } from "@/shared/decorators/public.decorator";
 import { ReferenceResponse } from "@/modules/reference/reference.response";
 import { ReferenceService } from "@/modules/reference/reference.service";
 import { Controller, Get } from "@nestjs/common";
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 
+// Filter labels are needed to render the search UI to a signed-out visitor.
+@Public()
 @ApiTags("reference")
 @Controller("reference")
 export class ReferenceController {

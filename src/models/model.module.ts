@@ -1,3 +1,4 @@
+import { RefreshTokenRepository } from "@/models/auth/refresh-token.repository";
 import { CrawlerRunRepository } from "@/models/crawler/crawler-run.repository";
 import { EmailLogRepository } from "@/models/email/email-log.repository";
 import { JobAlertMatchRepository } from "@/models/job-alerts/job-alert-match.repository";
@@ -17,6 +18,8 @@ import { Global, Module } from "@nestjs/common";
 const repositories = [
 	// Users
 	UsersRepository,
+	// Auth
+	RefreshTokenRepository,
 	// Jobs
 	JobRepository,
 	JobAttachmentRepository,

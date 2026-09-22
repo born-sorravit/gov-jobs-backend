@@ -1,3 +1,4 @@
+import { Public } from "@/shared/decorators/public.decorator";
 import { CrawlSummary, CrawlerService } from "@/modules/crawler/crawler.service";
 import { JobSource } from "@/shared/enums/job-source.enum";
 import {
@@ -8,6 +9,9 @@ import { Controller, HttpCode, Post, UseGuards } from "@nestjs/common";
 import { ApiHeader, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { SkipThrottle } from "@nestjs/throttler";
 
+// Guarded by InternalApiKeyGuard instead; without @Public the two schemes would
+// both run and the shared-secret call would still be rejected for lacking a JWT.
+@Public()
 @ApiTags("internal")
 @Controller("internal/crawler")
 @UseGuards(InternalApiKeyGuard)

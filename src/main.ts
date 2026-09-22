@@ -1,5 +1,8 @@
 import { AppModule } from "@/app.module";
-import { loadEnv } from "@/config/configuration";
+import configuration, {
+	assertUsableConfiguration,
+	loadEnv,
+} from "@/config/configuration";
 import { GlobalExceptionFilter } from "@/shared/filters/global.filter";
 import { ResponseFormatInterceptor } from "@/shared/interceptors/response.interceptor";
 import { Logger, ValidationPipe, VersioningType } from "@nestjs/common";
@@ -9,6 +12,9 @@ import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import helmet from "helmet";
 
 loadEnv();
+// Before Nest builds anything: a missing secret should name itself here, not surface
+// later as an error from whichever library first reaches for it.
+assertUsableConfiguration(configuration());
 
 async function bootstrap(): Promise<void> {
 	const logger = new Logger("Bootstrap");
@@ -22,6 +28,20 @@ async function bootstrap(): Promise<void> {
 
 	app.setGlobalPrefix(apiPrefix, { exclude: ["healthcheck"] });
 	app.enableVersioning({ type: VersioningType.URI, defaultVersion: "1" });
+
+	// Minimal request log under its own context. Useful operationally, and the only way to
+	// see how many round trips one frontend page render actually costs.
+	const requestLogger = new Logger("Request");
+	app.use(
+		(
+			req: { method: string; originalUrl: string },
+			_res: unknown,
+			next: () => void
+		) => {
+			requestLogger.log(`${req.method} ${req.originalUrl}`);
+			next();
+		}
+	);
 
 	app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 	app.enableCors({

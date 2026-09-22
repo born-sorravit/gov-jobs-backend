@@ -47,3 +47,29 @@ export const parseBangkokTimestamp = (
 	const parsed = new Date(hasZone ? trimmed : `${trimmed}+07:00`);
 	return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
+
+/**
+ * A date as a reader expects to see it, for email bodies.
+ *
+ * Thai uses the Buddhist era, which `th-TH-u-ca-buddhist` produces directly — the same rule
+ * the frontend applies, kept identical so an email and the site never disagree about a
+ * deadline.
+ */
+export const formatDate = (
+	value: string | Date | null | undefined,
+	locale: "th" | "en" = "th"
+): string => {
+	if (!value) return "—";
+	const date =
+		typeof value === "string"
+			? new Date(`${value.slice(0, 10)}T00:00:00+07:00`)
+			: value;
+	if (Number.isNaN(date.getTime())) return "—";
+
+	return new Intl.DateTimeFormat(locale === "th" ? "th-TH-u-ca-buddhist" : "en-GB", {
+		day: "numeric",
+		month: "short",
+		year: "numeric",
+		timeZone: BANGKOK_TIME_ZONE,
+	}).format(date);
+};

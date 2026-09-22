@@ -15,9 +15,27 @@ const text = (value: unknown): string | null => {
 	return trimmed === "" ? null : trimmed;
 };
 
-/** Joins the numbered halves OCSC splits employee fields into, dropping the empty ones. */
+/**
+ * Joins the numbered halves OCSC splits employee fields into.
+ *
+ * Empty halves are dropped, and so are exact repeats of a half already taken: the portal
+ * fills both `employeeJobSkill1` and `employeeJobSkill2` with the same sentence on 34 of
+ * the 34 announcements that use them, and joining blindly renders it twice.
+ *
+ * Deduplication compares against what has already been kept rather than collapsing the
+ * whole list, so the handful of announcements whose halves genuinely differ keep both, in
+ * the order the source published them.
+ */
 const joinText = (...values: unknown[]): string | null => {
-	const parts = values.map(text).filter((part): part is string => part !== null);
+	const parts: string[] = [];
+
+	for (const value of values) {
+		const part = text(value);
+		if (part !== null && !parts.includes(part)) {
+			parts.push(part);
+		}
+	}
+
 	return parts.length > 0 ? parts.join("\n") : null;
 };
 

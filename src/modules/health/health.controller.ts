@@ -1,9 +1,12 @@
+import { Public } from "@/shared/decorators/public.decorator";
 import { Controller, Get, VERSION_NEUTRAL } from "@nestjs/common";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
 import { SkipThrottle } from "@nestjs/throttler";
 import { InjectDataSource } from "@nestjs/typeorm";
 import { DataSource } from "typeorm";
 
+// Liveness must answer before anyone signs in — the scheduler pings it to wake the host.
+@Public()
 @ApiTags("health")
 // Version-neutral and outside the global prefix, so the URL stays a plain /healthcheck.
 @Controller({ version: VERSION_NEUTRAL })

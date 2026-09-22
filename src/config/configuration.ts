@@ -12,9 +12,53 @@ export const getEnvFilePath = (): string | undefined =>
 
 export const loadEnv = (): void => {
 	const envPath = getEnvFilePath();
-	if (envPath && fs.existsSync(envPath)) {
+	if (!envPath) return;
+
+	if (fs.existsSync(envPath)) {
 		dotenv.config({ path: envPath });
+		return;
 	}
+
+	/**
+	 * The file this NODE_ENV selects is missing.
+	 *
+	 * On Render and Vercel that is normal — the platform injects the variables directly and
+	 * there is no file to read. Locally it means every variable is about to be empty, and the
+	 * first symptom is something unhelpful and far away, like passport reporting
+	 * "JwtStrategy requires a secret or key". Saying so here is much cheaper to debug.
+	 */
+	if (process.env.NODE_ENV !== "production" && !process.env.JWT_SECRET) {
+		// eslint-disable-next-line no-console
+		console.warn(
+			`[config] ${envPath} not found and no variables are set in the environment.\n` +
+				`         NODE_ENV=${process.env.NODE_ENV ?? "(unset)"} selects that file; ` +
+				`"npm run start:local" reads .env instead.`
+		);
+	}
+};
+
+/**
+ * Refuses to start on a configuration that cannot work.
+ *
+ * `ConfigService.getOrThrow` does not help here: the keys all exist, they are just empty
+ * strings, so it returns "" happily and the failure surfaces much later in whichever library
+ * first tries to use one.
+ */
+export const assertUsableConfiguration = (config: Configuration): void => {
+	const missing: string[] = [];
+
+	if (!config.database.url) missing.push("DATABASE_URL");
+	if (!config.security.jwt.secret) missing.push("JWT_SECRET");
+	if (config.mail.provider === "resend" && !config.mail.apiKey)
+		missing.push("RESEND_API_KEY");
+
+	if (missing.length === 0) return;
+
+	throw new Error(
+		`Missing required configuration: ${missing.join(", ")}.\n` +
+			`Expected them in ${getEnvFilePath() ?? "the environment"} ` +
+			`(NODE_ENV=${process.env.NODE_ENV ?? "(unset)"}). See .env.example.`
+	);
 };
 
 const toInt = (value: string | undefined, fallback: number): number => {
@@ -74,10 +118,17 @@ export interface QueueConfig {
 export interface SecurityConfig {
 	jwt: {
 		secret: string;
+		/** Access-token lifetime, as a jsonwebtoken duration string (e.g. "15m"). */
 		expiresIn: string;
-		refreshSecret: string;
-		refreshTtlDays: number;
 	};
+	/**
+	 * Refresh tokens are opaque random strings, not JWTs: only their SHA-256 hash is stored,
+	 * so a database leak grants no sessions, revocation is a row update rather than a
+	 * blocklist, and there is no second signing secret to rotate. `refreshTtlDays` is a
+	 * number of days — deliberately not fed to `expiresIn`, which reads a bare number as
+	 * *seconds* and would have made a 30-day token live 30 seconds.
+	 */
+	refreshTtlDays: number;
 	bcryptRounds: number;
 	throttle: { ttlSeconds: number; limit: number };
 	internalApiKey: string;
@@ -155,9 +206,8 @@ export default (): Configuration => ({
 		jwt: {
 			secret: process.env.JWT_SECRET ?? "",
 			expiresIn: process.env.JWT_EXPIRES_IN ?? "15m",
-			refreshSecret: process.env.JWT_REFRESH_SECRET ?? process.env.JWT_SECRET ?? "",
-			refreshTtlDays: toInt(process.env.JWT_REFRESH_TTL_DAYS, 30),
 		},
+		refreshTtlDays: toInt(process.env.REFRESH_TTL_DAYS, 30),
 		bcryptRounds: toInt(process.env.BCRYPT_ROUNDS, 10),
 		throttle: {
 			ttlSeconds: toInt(process.env.THROTTLE_TTL_SECONDS, 60),

@@ -8,11 +8,19 @@ import {
 	JobSourceCrawler,
 	NormalizedJob,
 } from "@/modules/crawler/interfaces/job-source-crawler.interface";
+import {
+	MatchJobPayload,
+	QUEUE_JOB_MATCHING,
+	matchJobId,
+} from "@/constants/queue.constants";
+import { ReferenceService } from "@/modules/reference/reference.service";
 import { OcscCrawler } from "@/modules/crawler/ocsc/ocsc.crawler";
 import { CrawlerRunStatus } from "@/shared/enums/crawler-run-status.enum";
 import { JobSource } from "@/shared/enums/job-source.enum";
+import { InjectQueue } from "@nestjs/bullmq";
 import { ConflictException, Injectable, Logger } from "@nestjs/common";
-import { DeepPartial, LessThan } from "typeorm";
+import { Queue } from "bullmq";
+import { DeepPartial, In, LessThan } from "typeorm";
 import { QueryDeepPartialEntity } from "typeorm/query-builder/QueryPartialEntity";
 
 export interface CrawlSummary {
@@ -24,6 +32,11 @@ export interface CrawlSummary {
 	updatedJobs: number;
 	unchangedJobs: number;
 	skippedJobs: number;
+	/**
+	 * Announcements handed to the matching queue. The resulting match count is not known
+	 * when the crawl returns — workers write it to `CrawlerRun.alertMatches` as they finish.
+	 */
+	matchingEnqueued: number;
 	durationMs: number;
 	errorMessage: string | null;
 	/** Ids of announcements that were inserted or materially changed by this run. */
@@ -42,6 +55,9 @@ export class CrawlerService {
 		private readonly crawlerRunRepository: CrawlerRunRepository,
 		private readonly jobRepository: JobRepository,
 		private readonly jobAttachmentRepository: JobAttachmentRepository,
+		@InjectQueue(QUEUE_JOB_MATCHING)
+		private readonly matchingQueue: Queue<MatchJobPayload>,
+		private readonly referenceService: ReferenceService,
 		ocscCrawler: OcscCrawler
 	) {
 		this.crawlers = new Map([[ocscCrawler.source, ocscCrawler as JobSourceCrawler]]);
@@ -69,10 +85,16 @@ export class CrawlerService {
 			// Taxonomies first: a job referencing a brand-new province id is useless until the
 			// label exists, and this is cheap.
 			await crawler.syncReference();
+			// The taxonomies just changed underneath the cached copy.
+			await this.referenceService.invalidate(source);
 
 			const { jobs, rejected, totalFound } = await crawler.crawl();
 			const { newJobs, updatedJobs, unchangedJobs, changedJobIds } =
 				await this.persist(jobs);
+
+			// Handed to the queue rather than run here: a failure then retries one announcement
+			// instead of the whole crawl, and the request is not held open for the work.
+			const matchingEnqueued = await this.enqueueMatching(changedJobIds, run.id);
 
 			const summary: CrawlSummary = {
 				runId: run.id,
@@ -83,6 +105,7 @@ export class CrawlerService {
 				updatedJobs,
 				unchangedJobs,
 				skippedJobs: rejected.length,
+				matchingEnqueued,
 				durationMs: Date.now() - startedAt,
 				errorMessage: null,
 				changedJobIds,
@@ -100,7 +123,7 @@ export class CrawlerService {
 
 			this.logger.log(
 				`${source} crawl done in ${summary.durationMs}ms: ${totalFound} found, ` +
-					`${newJobs} new, ${updatedJobs} updated, ${unchangedJobs} unchanged, ${rejected.length} skipped`
+					`${newJobs} new, ${updatedJobs} updated, ${unchangedJobs} unchanged, ${rejected.length} skipped, ${matchingEnqueued} queued for matching`
 			);
 
 			return summary;
@@ -123,6 +146,7 @@ export class CrawlerService {
 				updatedJobs: 0,
 				unchangedJobs: 0,
 				skippedJobs: 0,
+				matchingEnqueued: 0,
 				durationMs: Date.now() - startedAt,
 				errorMessage,
 				changedJobIds: [],
@@ -172,6 +196,35 @@ export class CrawlerService {
 		if (result.affected) {
 			this.logger.warn(`Released ${result.affected} stale ${source} run(s)`);
 		}
+	}
+
+	/**
+	 * Hands each changed announcement to the matching queue.
+	 *
+	 * The job id is derived from the announcement and its content hash, so a retried crawl
+	 * that re-imports the same announcements enqueues nothing new — BullMQ drops a duplicate
+	 * id outright. The `(alert, job)` unique constraint is still the last line of defence.
+	 */
+	private async enqueueMatching(
+		jobIds: string[],
+		crawlerRunId: string
+	): Promise<number> {
+		if (jobIds.length === 0) return 0;
+
+		const jobs = await this.jobRepository.find({
+			where: { id: In(jobIds) },
+			select: { id: true, contentHash: true },
+		});
+
+		await this.matchingQueue.addBulk(
+			jobs.map((job) => ({
+				name: "match",
+				data: { jobId: job.id, crawlerRunId },
+				opts: { jobId: matchJobId(job.id, job.contentHash) },
+			}))
+		);
+
+		return jobs.length;
 	}
 
 	private async persist(jobs: NormalizedJob[]): Promise<{

@@ -1,3 +1,4 @@
+import { Public } from "@/shared/decorators/public.decorator";
 import {
 	JobDetailResponse,
 	JobSummaryResponse,
@@ -8,6 +9,8 @@ import { PaginatedResponse } from "@/shared/utils/pagination.util";
 import { Controller, Get, Param, ParseUUIDPipe, Query } from "@nestjs/common";
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 
+// A public job board: browsing and reading announcements never requires an account.
+@Public()
 @ApiTags("jobs")
 @Controller("jobs")
 export class JobsController {

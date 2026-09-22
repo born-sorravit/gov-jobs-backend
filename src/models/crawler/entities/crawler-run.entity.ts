@@ -52,6 +52,14 @@ export class CrawlerRun extends BaseEntity {
 	@Column({ name: "unchanged_jobs", type: "int", default: 0 })
 	unchangedJobs: number;
 
+	/**
+	 * Alert matches recorded from this run's new and changed announcements. Without it the
+	 * core feature is invisible — there would be no way to see matching working short of
+	 * querying the database by hand.
+	 */
+	@Column({ name: "alert_matches", type: "int", default: 0 })
+	alertMatches: number;
+
 	@Column({ name: "error_message", type: "text", nullable: true })
 	errorMessage: string | null;
 
