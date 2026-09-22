@@ -1,0 +1,120 @@
+# Render Blueprint for the Gov Jobs API.
+#
+# Create it from the Render dashboard with "New > Blueprint" pointed at this repo. Every
+# `sync: false` variable is prompted for once at that point and then lives only in Render.
+#
+# The free web service sleeps after ~15 minutes without an inbound request, which is why
+# CRAWLER_SCHEDULER_ENABLED stays false here: an in-process timer would stop firing. The
+# GitHub Actions workflow in .github/workflows/crawl.yml is the real scheduler, and its
+# request also wakes the instance. See docs/deployment.md.
+services:
+  - name: gov-jobs-backend
+    type: web
+    runtime: node
+    plan: free
+    # Supabase lives in aws-0-ap-southeast-1; anything else puts an ocean between the API
+    # and its database, and /admin/overview alone fires a dozen concurrent COUNT(*).
+    region: singapore
+    branch: main
+    healthCheckPath: /healthcheck
+    autoDeployTrigger: commit
+
+    buildCommand: npm ci && npm run build
+    # migration:run reads ./dist/shared/database/typeorm.config.js, so it has to follow the
+    # build. Migrations are idempotent, so running them on every cold start is safe.
+    startCommand: npm run migration:run && node dist/main
+
+    envVars:
+      # --- App -------------------------------------------------------------
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "24"
+      # PORT is injected by Render; main.ts reads it and binds 0.0.0.0.
+      - key: API_PREFIX
+        value: api
+      - key: APP_TIMEZONE
+        value: Asia/Bangkok
+      # Both are the Vercel production URL. PUBLIC_WEB_URL is what alert emails link to —
+      # leave it wrong and every email points at localhost.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: PUBLIC_WEB_URL
+        sync: false
+
+      # --- Database --------------------------------------------------------
+      # Supabase *session* pooler URI (port 5432). The transaction pooler (6543) silently
+      # drops LISTEN/NOTIFY and the BullMQ workers never wake.
+      - key: DATABASE_URL
+        sync: false
+      - key: DB_SSL
+        value: "true"
+      - key: DB_LOGGING
+        value: "false"
+
+      # --- Queue -----------------------------------------------------------
+      - key: QUEUE_SCHEMA
+        value: bullmq
+      - key: QUEUE_PREFIX
+        value: gov-jobs
+
+      # --- Cache -----------------------------------------------------------
+      # Optional: unless both are set the app falls back to an in-process Map.
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: CACHE_PREFIX
+        value: gov-jobs
+      - key: CACHE_TTL_SECONDS
+        value: "300"
+
+      # --- Security --------------------------------------------------------
+      # Nothing outside this service needs to know it, so let Render generate it.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 15m
+      - key: REFRESH_TTL_DAYS
+        value: "30"
+      - key: REFRESH_ROTATION_GRACE_MS
+        value: "15000"
+      - key: BCRYPT_ROUNDS
+        value: "10"
+      - key: THROTTLE_TTL_SECONDS
+        value: "60"
+      - key: THROTTLE_LIMIT
+        value: "120"
+      # Not generateValue: GitHub Actions has to send the identical string, so you pick it
+      # once and paste it into both here and the repository secret.
+      - key: INTERNAL_API_KEY
+        sync: false
+
+      # --- Crawler ---------------------------------------------------------
+      - key: OCSC_API_BASE_URL
+        value: https://jobapp.ocsc.go.th/jobapi
+      - key: OCSC_PORTAL_BASE_URL
+        value: https://job.ocsc.go.th/portal
+      - key: OCSC_TIMEOUT_MS
+        value: "30000"
+      # The source is a public portal; identify the crawler honestly so they can find us.
+      - key: OCSC_USER_AGENT
+        value: "gov-jobs-alert/1.0 (+https://github.com/born-sorravit/gov-jobs-backend; public job announcement aggregator)"
+      # Only read when the in-process scheduler is on, which it is not here. Kept so this
+      # file mirrors .env.example rather than quietly omitting a knob.
+      - key: OCSC_CRAWL_INTERVAL_MINUTES
+        value: "60"
+      # Deliberately off — see the note at the top of this file.
+      - key: CRAWLER_SCHEDULER_ENABLED
+        value: "false"
+
+      # --- Email -----------------------------------------------------------
+      - key: MAIL_PROVIDER
+        value: resend
+      - key: RESEND_API_KEY
+        sync: false
+      # Must be on a domain verified in Resend, or every send fails.
+      - key: MAIL_FROM
+        sync: false
+      - key: MAIL_REPLY_TO
+        sync: false

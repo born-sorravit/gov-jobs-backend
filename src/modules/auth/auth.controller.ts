@@ -1,16 +1,28 @@
 import {
 	AuthSessionResponse,
 	AuthUserResponse,
+	ChangePasswordDto,
+	DeleteAccountDto,
 	LoginDto,
 	RefreshDto,
 	RegisterDto,
+	UpdateProfileDto,
 } from "@/modules/auth/dto/auth.dto";
 import { AuthService } from "@/modules/auth/auth.service";
 import { CurrentUser } from "@/shared/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "@/shared/decorators/current-user.decorator";
 import { Public } from "@/shared/decorators/public.decorator";
 import { MessagedResponse } from "@/shared/interceptors/response.interceptor";
-import { Body, Controller, Get, Headers, HttpCode, Post } from "@nestjs/common";
+import {
+	Body,
+	Controller,
+	Delete,
+	Get,
+	Headers,
+	HttpCode,
+	Patch,
+	Post,
+} from "@nestjs/common";
 import {
 	ApiBearerAuth,
 	ApiOkResponse,
@@ -94,5 +106,53 @@ export class AuthController {
 	@ApiOkResponse({ type: AuthUserResponse })
 	me(@CurrentUser() user: AuthenticatedUser): Promise<AuthUserResponse> {
 		return this.authService.me(user.id);
+	}
+
+	@Patch("me")
+	@ApiBearerAuth()
+	@ApiOperation({
+		summary: "Update the signed-in account",
+		description: "Name and email language. The address itself cannot be changed.",
+	})
+	@ApiOkResponse({ type: AuthUserResponse })
+	updateProfile(
+		@CurrentUser() user: AuthenticatedUser,
+		@Body() dto: UpdateProfileDto
+	): Promise<AuthUserResponse> {
+		return this.authService.updateProfile(user.id, dto);
+	}
+
+	@Throttle(CREDENTIAL_THROTTLE)
+	@Post("change-password")
+	@HttpCode(200)
+	@ApiBearerAuth()
+	@ApiOperation({
+		summary: "Change the password",
+		description:
+			"Every existing session is revoked; the returned session replaces the caller's.",
+	})
+	@ApiOkResponse({ type: AuthSessionResponse })
+	changePassword(
+		@CurrentUser() user: AuthenticatedUser,
+		@Body() dto: ChangePasswordDto,
+		@Headers("user-agent") userAgent?: string
+	): Promise<AuthSessionResponse> {
+		return this.authService.changePassword(user.id, dto, userAgent);
+	}
+
+	@Throttle(CREDENTIAL_THROTTLE)
+	@Delete("me")
+	@HttpCode(200)
+	@ApiBearerAuth()
+	@ApiOperation({
+		summary: "Delete the signed-in account",
+		description: "Irreversible. Takes the alerts, saved jobs and sessions with it.",
+	})
+	async deleteAccount(
+		@CurrentUser() user: AuthenticatedUser,
+		@Body() dto: DeleteAccountDto
+	): Promise<MessagedResponse<null>> {
+		await this.authService.deleteAccount(user.id, dto);
+		return new MessagedResponse(null, "Account deleted");
 	}
 }

@@ -273,4 +273,125 @@ describe("authentication", () => {
 			);
 		});
 	});
+
+	describe("account management", () => {
+		const patch = (token: string, body: object) =>
+			request(app.getHttpServer())
+				.patch("/api/v1/auth/me")
+				.set("Authorization", `Bearer ${token}`)
+				.send(body);
+
+		const destroy = (token: string, body: object) =>
+			request(app.getHttpServer())
+				.delete("/api/v1/auth/me")
+				.set("Authorization", `Bearer ${token}`)
+				.send(body);
+
+		it("updates the name and email language", async () => {
+			const { body } = await register("editor").expect(201);
+
+			const updated = await patch(body.data.accessToken, {
+				name: "  ชื่อใหม่  ",
+				locale: "en",
+			}).expect(200);
+
+			// Trimmed on the way in, so a stray space cannot become part of the name.
+			expect(updated.body.data.name).toBe("ชื่อใหม่");
+			expect(updated.body.data.locale).toBe("en");
+		});
+
+		it("leaves omitted fields alone", async () => {
+			const { body } = await register("partial").expect(201);
+			await patch(body.data.accessToken, { locale: "en" }).expect(200);
+
+			const { body: after } = await patch(body.data.accessToken, {
+				name: "Only The Name",
+			}).expect(200);
+
+			expect(after.data.locale).toBe("en");
+		});
+
+		it("ignores a role smuggled into the body", async () => {
+			const { body } = await register("climber").expect(201);
+
+			const { body: after } = await patch(body.data.accessToken, {
+				name: "Climber",
+				role: "ADMIN",
+			}).expect(200);
+
+			expect(after.data.role).toBe("USER");
+		});
+
+		it("rejects a password change that cannot prove the current one", async () => {
+			const { body } = await register("forgetful").expect(201);
+
+			await request(app.getHttpServer())
+				.post("/api/v1/auth/change-password")
+				.set("Authorization", `Bearer ${body.data.accessToken}`)
+				.send({ currentPassword: "not-it", newPassword: "a-brand-new-one" })
+				.expect(401);
+		});
+
+		it("ends every other session when the password changes", async () => {
+			const { body: first } = await register("rotator").expect(201);
+			// A second sign-in, standing in for another device.
+			const { body: second } = await post("/auth/login", {
+				email: email("rotator"),
+				password: PASSWORD,
+			}).expect(200);
+
+			const { body: changed } = await request(app.getHttpServer())
+				.post("/api/v1/auth/change-password")
+				.set("Authorization", `Bearer ${first.data.accessToken}`)
+				.send({ currentPassword: PASSWORD, newPassword: "a-brand-new-one" })
+				.expect(200);
+
+			// Both older sessions are gone; only the one just handed back still works.
+			await post("/auth/refresh", { refreshToken: first.data.refreshToken }).expect(
+				401
+			);
+			await post("/auth/refresh", { refreshToken: second.data.refreshToken }).expect(
+				401
+			);
+			await post("/auth/refresh", {
+				refreshToken: changed.data.refreshToken,
+			}).expect(200);
+
+			await post("/auth/login", {
+				email: email("rotator"),
+				password: PASSWORD,
+			}).expect(401);
+			await post("/auth/login", {
+				email: email("rotator"),
+				password: "a-brand-new-one",
+			}).expect(200);
+		});
+
+		it("refuses a deletion that cannot prove the password", async () => {
+			const { body } = await register("stayer").expect(201);
+
+			await destroy(body.data.accessToken, { password: "not-it" }).expect(401);
+			// Still signed in: a mistyped password must not end the session.
+			await request(app.getHttpServer())
+				.get("/api/v1/auth/me")
+				.set("Authorization", `Bearer ${body.data.accessToken}`)
+				.expect(200);
+		});
+
+		it("deletes the account and everything hanging off it", async () => {
+			const { body } = await register("quitter").expect(201);
+			const userId = body.data.user.id;
+
+			await destroy(body.data.accessToken, { password: PASSWORD }).expect(200);
+
+			expect(await dataSource.getRepository(User).countBy({ id: userId })).toBe(0);
+			expect(await dataSource.getRepository(RefreshToken).countBy({ userId })).toBe(
+				0
+			);
+			await post("/auth/login", {
+				email: email("quitter"),
+				password: PASSWORD,
+			}).expect(401);
+		});
+	});
 });

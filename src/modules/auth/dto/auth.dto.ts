@@ -60,6 +60,47 @@ export class RefreshDto {
 	refreshToken: string;
 }
 
+const trimmed = ({ value }: { value: unknown }): unknown =>
+	typeof value === "string" ? value.trim() : value;
+
+export class UpdateProfileDto {
+	@ApiPropertyOptional({ example: "สมชาย ใจดี" })
+	@IsOptional()
+	@IsString()
+	@MinLength(1)
+	@MaxLength(120)
+	@Transform(trimmed)
+	name?: string;
+
+	/** Chooses the language of alert emails, not just the UI — the UI reads the URL. */
+	@ApiPropertyOptional({ enum: ["th", "en"] })
+	@IsOptional()
+	@IsIn(["th", "en"])
+	locale?: string;
+}
+
+export class ChangePasswordDto {
+	@ApiProperty({
+		description: "Proves the person at the keyboard owns the account.",
+	})
+	@IsString()
+	@MinLength(1)
+	currentPassword: string;
+
+	@ApiProperty({ minLength: 8, maxLength: 128 })
+	@IsString()
+	@MinLength(8)
+	@MaxLength(128)
+	newPassword: string;
+}
+
+export class DeleteAccountDto {
+	@ApiProperty({ description: "The account password. Deletion is irreversible." })
+	@IsString()
+	@MinLength(1)
+	password: string;
+}
+
 export class AuthUserResponse {
 	@ApiProperty() id: string;
 	@ApiProperty() email: string;

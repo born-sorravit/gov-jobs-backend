@@ -2,15 +2,20 @@ import { RefreshToken } from "@/models/auth/entities/refresh-token.entity";
 import { RefreshTokenRepository } from "@/models/auth/refresh-token.repository";
 import { User } from "@/models/users/entities/user.entity";
 import { UsersRepository } from "@/models/users/user.repository";
+import { EmailLogRepository } from "@/models/email/email-log.repository";
 import {
 	AuthSessionResponse,
 	AuthUserResponse,
+	ChangePasswordDto,
+	DeleteAccountDto,
 	LoginDto,
 	RegisterDto,
+	UpdateProfileDto,
 } from "@/modules/auth/dto/auth.dto";
 import { AccessTokenPayload } from "@/modules/auth/strategies/jwt.strategy";
 import { UserRole } from "@/shared/enums/user-role.enum";
 import {
+	BadRequestException,
 	ConflictException,
 	Injectable,
 	UnauthorizedException,
@@ -49,6 +54,7 @@ export class AuthService {
 	constructor(
 		private readonly usersRepository: UsersRepository,
 		private readonly refreshTokenRepository: RefreshTokenRepository,
+		private readonly emailLogRepository: EmailLogRepository,
 		private readonly jwtService: JwtService,
 		private readonly configService: ConfigService
 	) {}
@@ -171,6 +177,125 @@ export class AuthService {
 			throw new UnauthorizedException("Account no longer exists");
 		}
 		return this.toUserResponse(user);
+	}
+
+	/**
+	 * Name and email language.
+	 *
+	 * Email is deliberately not editable: it is the identity the account is keyed on, every
+	 * alert is addressed to it, and changing it safely needs a verification round-trip that
+	 * does not exist yet.
+	 */
+	async updateProfile(
+		userId: string,
+		dto: UpdateProfileDto
+	): Promise<AuthUserResponse> {
+		const user = await this.usersRepository.findOne({ where: { id: userId } });
+		if (!user) {
+			throw new UnauthorizedException("Account no longer exists");
+		}
+
+		// Only the keys actually sent: a PATCH that omits `locale` must not blank it.
+		const changes: Partial<User> = {};
+		if (dto.name !== undefined) changes.name = dto.name;
+		if (dto.locale !== undefined) changes.locale = dto.locale;
+
+		if (Object.keys(changes).length > 0) {
+			await this.usersRepository.update(user.id, changes);
+			Object.assign(user, changes);
+		}
+
+		return this.toUserResponse(user);
+	}
+
+	/**
+	 * Changes the password and ends every other session.
+	 *
+	 * Revoking the lot is the point: someone changing their password may be doing it because a
+	 * device was lost. A fresh session comes back so the device that made the change stays
+	 * signed in — the revoke happens first, so the new token is not caught by it.
+	 */
+	async changePassword(
+		userId: string,
+		dto: ChangePasswordDto,
+		userAgent?: string
+	): Promise<AuthSessionResponse> {
+		const user = await this.usersRepository.findOne({
+			where: { id: userId },
+			select: {
+				id: true,
+				email: true,
+				name: true,
+				role: true,
+				isVerified: true,
+				locale: true,
+				passwordHash: true,
+			},
+		});
+		if (!user) {
+			throw new UnauthorizedException("Account no longer exists");
+		}
+
+		// No dummy-hash dance here: the caller already proved they hold a session, so there is
+		// no account to enumerate and the specific message is the more useful one.
+		if (!(await compare(dto.currentPassword, user.passwordHash))) {
+			throw new UnauthorizedException("Current password is incorrect");
+		}
+
+		if (await compare(dto.newPassword, user.passwordHash)) {
+			throw new BadRequestException(
+				"The new password must be different from the current one"
+			);
+		}
+
+		const rounds = this.configService.get<number>("security.bcryptRounds", 10);
+		await this.usersRepository.update(user.id, {
+			passwordHash: await hash(dto.newPassword, rounds),
+		});
+
+		await this.refreshTokenRepository.update(
+			{ userId: user.id, revokedAt: IsNull() },
+			{ revokedAt: new Date(), revokedReason: "password" }
+		);
+
+		return this.issueSession(user, userAgent);
+	}
+
+	/**
+	 * Deletes the account for good.
+	 *
+	 * Alerts, matches, saved jobs and sessions go with it through `ON DELETE CASCADE`. The
+	 * email log does not — it has no foreign key — so it is cleared explicitly rather than
+	 * left holding the address of someone who asked to be forgotten.
+	 */
+	async deleteAccount(userId: string, dto: DeleteAccountDto): Promise<void> {
+		const user = await this.usersRepository.findOne({
+			where: { id: userId },
+			select: { id: true, role: true, passwordHash: true },
+		});
+		if (!user) {
+			throw new UnauthorizedException("Account no longer exists");
+		}
+
+		if (!(await compare(dto.password, user.passwordHash))) {
+			throw new UnauthorizedException("Password is incorrect");
+		}
+
+		// Roles are granted by a command with database access, never through the API, so an
+		// admin who deletes themselves could lock everyone out of the deployment.
+		if (user.role === UserRole.ADMIN) {
+			const admins = await this.usersRepository.count({
+				where: { role: UserRole.ADMIN },
+			});
+			if (admins <= 1) {
+				throw new ConflictException(
+					"The last administrator account cannot be deleted"
+				);
+			}
+		}
+
+		await this.emailLogRepository.delete({ userId: user.id });
+		await this.usersRepository.delete(user.id);
 	}
 
 	/** Housekeeping for expired and revoked rows; safe to call from a scheduled job. */

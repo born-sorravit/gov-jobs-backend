@@ -36,9 +36,10 @@ export class RefreshToken extends BaseEntity {
 	 * `rotated` means a refresh replaced it — and a browser that fired several requests at
 	 * once may still be holding it, so a reuse within seconds is a race, not a theft.
 	 * `logout` means the user asked to end the session, which is never forgiven.
+	 * `password` means a password change ended every session at once — also never forgiven.
 	 */
 	@Column({ name: "revoked_reason", type: "varchar", length: 16, nullable: true })
-	revokedReason: "rotated" | "logout" | null;
+	revokedReason: "rotated" | "logout" | "password" | null;
 
 	/** Best-effort context for a "your sessions" screen later; never used for auth. */
 	@Column({ name: "user_agent", type: "varchar", length: 255, nullable: true })

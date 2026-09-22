@@ -28,7 +28,7 @@ export const loadEnv = (): void => {
 	 * "JwtStrategy requires a secret or key". Saying so here is much cheaper to debug.
 	 */
 	if (process.env.NODE_ENV !== "production" && !process.env.JWT_SECRET) {
-		// eslint-disable-next-line no-console
+		// biome-ignore lint/suspicious/noConsole: runs before Nest boots, so there is no Logger yet
 		console.warn(
 			`[config] ${envPath} not found and no variables are set in the environment.\n` +
 				`         NODE_ENV=${process.env.NODE_ENV ?? "(unset)"} selects that file; ` +

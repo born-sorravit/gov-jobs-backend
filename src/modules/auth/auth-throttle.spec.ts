@@ -13,16 +13,19 @@ import {
 describe("credential throttling", () => {
 	const GLOBAL_LIMIT = 120;
 
-	it.each(["register", "login"])("applies a tighter limit to %s", (method) => {
-		const handler = AuthController.prototype[method as "login"];
+	it.each(["register", "login", "changePassword", "deleteAccount"])(
+		"applies a tighter limit to %s",
+		(method) => {
+			const handler = AuthController.prototype[method as "login"];
 
-		const limit = Reflect.getMetadata(`${THROTTLER_LIMIT}default`, handler);
-		const ttl = Reflect.getMetadata(`${THROTTLER_TTL}default`, handler);
+			const limit = Reflect.getMetadata(`${THROTTLER_LIMIT}default`, handler);
+			const ttl = Reflect.getMetadata(`${THROTTLER_TTL}default`, handler);
 
-		expect(limit).toBeLessThan(GLOBAL_LIMIT);
-		expect(limit).toBeLessThanOrEqual(10);
-		expect(ttl).toBe(60_000);
-	});
+			expect(limit).toBeLessThan(GLOBAL_LIMIT);
+			expect(limit).toBeLessThanOrEqual(10);
+			expect(ttl).toBe(60_000);
+		}
+	);
 
 	it("leaves the limit tunable per deployment", () => {
 		// Defaults to 10; AUTH_THROTTLE_LIMIT overrides it without a code change.
