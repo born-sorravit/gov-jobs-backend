@@ -215,7 +215,7 @@ SUCCESS with zero announcements — indistinguishable from every job closing at 
 B=http://localhost:3001/api/v1/internal/crawler
 H="x-internal-api-key: $INTERNAL_API_KEY"
 
-curl -X POST -H "$H" "$B/run"        # OCSC — the legacy alias the deployed cron calls
+curl -X POST -H "$H" "$B/run"        # OCSC only — kept for anything still calling it
 curl -X POST -H "$H" "$B/run/OCSC"   # one named source (case-insensitive)
 curl -X POST -H "$H" "$B/run/DOL"
 curl -X POST -H "$H" "$B/run-all"    # every registered source, in sequence
@@ -230,9 +230,12 @@ yet — the enum is a database type, so its values run ahead of the code.
 failing or already running never stops the others. A caller that wants to go red on a
 partial failure reads those counts.
 
-In deployment `.github/workflows/crawl.yml` calls `run` on a schedule — see Deployment. It
-stays on the legacy alias until there is a second source worth crawling; switching it to
-`run-all` is a one-line, separately revertible change. Locally,
+In deployment `.github/workflows/crawl.yml` calls **`run-all`** on a schedule — see
+Deployment. It judges the result from the body rather than the status code, and goes red only
+when *every* source failed: one source failing happens often enough (MDES answers 403 to
+bursts and recovers on its own) that treating it as an alarm would leave the workflow
+permanently red, which is a workflow nobody reads. A partial failure surfaces as a GitHub
+warning annotation, and `crawler_run` carries the error either way. Locally,
 `CRAWLER_SCHEDULER_ENABLED=true` runs every registered source in-process each
 `CRAWLER_INTERVAL_MINUTES` instead.
 
@@ -675,9 +678,9 @@ test in the file.
   `persist()` does a lookup, a write and an attachment reconcile per announcement — roughly
   350 round trips at ~46ms each. Fine at 51 announcements and the obvious thing to batch if
   a second source multiplies it.
-- `.github/workflows/crawl.yml` is the production crawl trigger but **nothing runs it yet**:
-  the backend has no git repo (only `gov-jobs-frontend` does), and it needs the `API_BASE_URL`
-  and `INTERNAL_API_KEY` repository secrets once it has one.
+- `.github/workflows/crawl.yml` is the production crawl trigger and calls `run-all`, so it
+  covers every registered source. It needs the `API_BASE_URL` and `INTERNAL_API_KEY`
+  repository secrets; without them every run fails at the wake step.
 - `raw_payload` keeps the source entry verbatim. Measured at 1.4 kB/row after jsonb
   compression — ~7 MB at 5,000 announcements, against Supabase free's 256 MB. No action
   needed; recheck if a second source multiplies the row count.

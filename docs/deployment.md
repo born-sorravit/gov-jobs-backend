@@ -159,8 +159,12 @@ API=https://<render-service>.onrender.com
 curl -s "$API/healthcheck"                       # {"database":"up"}
 curl -s "$API/api/v1/jobs?limit=1" | head -c 200 # public search
 curl -s -X POST -H "x-internal-api-key: $KEY" \
-     "$API/api/v1/internal/crawler/run"          # {"status":"SUCCESS",...}
+     "$API/api/v1/internal/crawler/run-all" | jq '.data | {succeeded, failed, skipped}'
 ```
+
+`run-all` is what the scheduled workflow calls. It answers 200 whatever the sources did, so
+read the body: `succeeded: 0` is the only result that means the crawl is broken. One source
+failing is normal — MDES answers 403 to bursts and recovers on its own.
 
 Then open `https://<project>.vercel.app/admin` — *Crawler health* should show the run you just
 triggered.
@@ -174,7 +178,7 @@ in-process timer would stop firing. `crawl.yml` is the real scheduler, and its r
 wakes the instance — the workflow pings `/healthcheck` with retries first because a cold start
 takes up to a minute and the crawl request would otherwise time out.
 
-**Email is sent by in-process workers, inside that awake window.** `POST /internal/crawler/run`
+**Email is sent by in-process workers, inside that awake window.** `POST /internal/crawler/run-all`
 returns once matching is *enqueued*, not once email is sent. In practice this is fine:
 enqueue→sent latency is sub-second, and the retry ladder (`attempts: 5`, exponential from 5s)
 tops out around 75 seconds — all far inside the ~15 minutes the instance stays up after the

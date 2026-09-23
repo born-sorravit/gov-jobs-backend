@@ -1,4 +1,4 @@
-name: OCSC crawl
+name: Crawl government job sources
 
 # Render's free web service sleeps when idle, so an in-process cron inside the API simply
 # stops firing. This workflow is the scheduler: the request both triggers the crawl and
@@ -20,24 +20,57 @@ jobs:
             -o /dev/null -w 'healthcheck: %{http_code}\n' \
             "${{ secrets.API_BASE_URL }}/healthcheck"
 
-      - name: Trigger the crawl
+      - name: Crawl every registered source
+        # `run-all` rather than `run`: the latter is OCSC only, which left DOL and MDES
+        # implemented but never crawled. Sources run in sequence and are isolated from each
+        # other — one failing does not stop the rest.
+        #
+        # The timeout is generous because this is three sources rather than one, and because
+        # a crawl that outlives the request still completes server-side: a client timeout
+        # would fail the workflow over work that actually succeeded.
         run: |
-          response=$(curl -sS --max-time 300 \
+          response=$(curl -sS --max-time 600 \
             -X POST \
             -H "x-internal-api-key: ${{ secrets.INTERNAL_API_KEY }}" \
-            "${{ secrets.API_BASE_URL }}/api/v1/internal/crawler/run")
-          echo "$response"
-          # The endpoint returns 200 with status FAILED when the source was unreachable, so
-          # the workflow has to read the body to know whether to go red.
-          echo "$response" | grep -q '"status":"SUCCESS"' || {
-            echo "::error::crawl did not report SUCCESS"
+            "${{ secrets.API_BASE_URL }}/api/v1/internal/crawler/run-all")
+
+          # Always 200, whatever the individual sources did — the body is the result, so
+          # parse it rather than trusting the status code.
+          # `[]?` throughout: a deployment answering an error page has no summary, and the
+          # check below should report that rather than a jq stack trace.
+          echo "$response" | jq '.data | {totalSources, succeeded, failed, skipped}?' 2>/dev/null
+          echo "$response" | jq -r '.data.runs[]? | "  \(.source): \(.status) found=\(.totalFound) new=\(.newJobs) skipped=\(.skippedJobs)"' 2>/dev/null
+          echo "$response" | jq -r '.data.skippedSources[]? | "  \(.source): skipped — \(.reason)"' 2>/dev/null
+
+          succeeded=$(echo "$response" | jq -r '.data.succeeded // empty' 2>/dev/null)
+          failed=$(echo "$response" | jq -r '.data.failed // empty' 2>/dev/null)
+
+          # A body without these is a broken deployment, not a failed crawl.
+          if [ -z "$succeeded" ]; then
+            echo "::error::run-all returned no summary — is the deployment healthy?"
             exit 1
-          }
+          fi
+
+          # Red only when *nothing* worked. One source failing is expected often enough to be
+          # useless as an alarm — MDES answers 403 to bursts and recovers on its own, and a
+          # workflow that is permanently red is a workflow nobody reads. A failure still
+          # surfaces as an annotation, and `crawler_run` carries the error either way.
+          if [ "$succeeded" = "0" ]; then
+            echo "::error::every source failed"
+            exit 1
+          fi
+
+          if [ "${failed:-0}" != "0" ]; then
+            echo "::warning::$failed source(s) failed; $succeeded succeeded"
+          fi
 
   digests:
     # Digests are driven from outside for the same reason as the crawl: the free-tier
     # instance sleeps, and a daily digest that only fires when somebody happens to be
     # browsing the site is not a daily digest.
+    #
+    # `needs: crawl` still holds, and the crawl job now only fails when *every* source did —
+    # so a single bad source no longer silently cancels the day's digests.
     runs-on: ubuntu-latest
     needs: crawl
     steps:
