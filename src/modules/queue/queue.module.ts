@@ -4,7 +4,6 @@ import {
 	QUEUE_DOCUMENT_PROCESSING,
 	QUEUE_EMAIL_NOTIFICATION,
 	QUEUE_JOB_MATCHING,
-	QUEUE_OCSC_CRAWLER,
 } from "@/constants/queue.constants";
 import { BullModule } from "@nestjs/bullmq";
 import { Global, Module } from "@nestjs/common";
@@ -46,20 +45,30 @@ setDefaultBackendFactory(createPostgresBackend);
 						// BullMQ owns its own tables and migrates them itself; they live in their
 						// own schema so TypeORM's diff never sees them.
 						migrate: true,
-						// Each queue holds a dedicated LISTEN client plus a small pool. Supabase's
-						// free tier has a finite connection budget shared with the API.
-						max: 3,
+						/**
+						 * **One** pooled connection per queue and per worker, not three.
+						 *
+						 * Every `Queue` and every `Worker` opens its own pool against the same
+						 * Postgres, and a worker additionally holds a dedicated LISTEN client that
+						 * cannot be shared. Supabase's session pooler allows 15 clients in total,
+						 * shared with the API's own pool — measured at **17 in flight** during a
+						 * crawl that enqueued 52 matching jobs and 50 documents, which is what
+						 * `max clients reached in session mode` was reporting.
+						 *
+						 * One is enough: each of these pools serves a single worker loop, and the
+						 * work is queued rather than latency-sensitive.
+						 */
+						max: 1,
 					},
 					prefix: queue.prefix,
 					defaultJobOptions: DEFAULT_JOB_OPTIONS,
 				};
 			},
 		}),
+		// `ocsc-crawler` used to be registered here and never had a producer or a processor —
+		// a queue nobody posted to, holding a connection against a budget of 15.
 		BullModule.registerQueue(
-			{ name: QUEUE_OCSC_CRAWLER },
 			{ name: QUEUE_JOB_MATCHING },
-			// Registered for producing only. Step 11 adds the processor — a worker with an
-			// empty handler would silently acknowledge real work.
 			{ name: QUEUE_EMAIL_NOTIFICATION },
 			{ name: QUEUE_DOCUMENT_PROCESSING }
 		),

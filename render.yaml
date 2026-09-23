@@ -35,6 +35,15 @@ services:
         value: production
       - key: NODE_VERSION
         value: "24"
+      # An explicit V8 heap ceiling, well under the instance's 512 MB.
+      #
+      # Without one, Node picks a limit from what it can detect about the container, and a
+      # deploy died with "Ineffective mark-compacts near heap limit". Measured locally, a
+      # crawl that imported 54 announcements and read 50 PDFs peaks at ~176 MB RSS with the
+      # heap itself under 20 MB — so 384 is generous for the workload while still forcing V8
+      # to collect rather than grow into the container's limit.
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=384"
       # PORT is injected by Render; main.ts reads it and binds 0.0.0.0.
       - key: API_PREFIX
         value: api
@@ -58,6 +67,12 @@ services:
       # drops LISTEN/NOTIFY and the BullMQ workers never wake.
       - key: DATABASE_URL
         sync: false
+      # Supabase's session pooler allows 15 clients in total. Every BullMQ queue and worker
+      # holds one, and a worker also holds a LISTEN client that cannot be shared — measured at
+      # 17 in flight before this was capped, which is what "max clients reached in session
+      # mode" was reporting. With 3 here the same load peaks at 11.
+      - key: DB_POOL_MAX
+        value: "3"
       - key: DB_SSL
         value: "true"
       - key: DB_LOGGING
@@ -140,8 +155,10 @@ services:
       # --- Document processing ---------------------------------------------
       # The PDF reader shares this instance with the API. Anything larger is refused rather
       # than loaded; DOL's largest announcement so far is ~14 MB.
+      # 16 MB. The buffer is held in memory while pdf.js parses it, and the largest
+      # announcement seen so far (a 20-page DOL scan) is 13.2 MB.
       - key: DOCUMENT_MAX_BYTES
-        value: "26214400"
+        value: "16777216"
       - key: DOCUMENT_MIN_TEXT_LENGTH
         value: "200"
       - key: DOCUMENT_TIMEOUT_MS

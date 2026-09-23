@@ -347,7 +347,7 @@ export default (): Configuration => ({
 		),
 	},
 	document: {
-		maxBytes: toInt(process.env.DOCUMENT_MAX_BYTES, 25 * 1024 * 1024),
+		maxBytes: toInt(process.env.DOCUMENT_MAX_BYTES, 16 * 1024 * 1024),
 		minTextLength: toInt(process.env.DOCUMENT_MIN_TEXT_LENGTH, 200),
 		timeoutMs: toInt(process.env.DOCUMENT_TIMEOUT_MS, 60_000),
 		batchSize: toInt(process.env.DOCUMENT_BATCH_SIZE, 50),

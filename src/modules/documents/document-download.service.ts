@@ -100,7 +100,11 @@ export class DocumentDownloadService {
 	 */
 	private async readCapped(response: Response, url: string): Promise<Uint8Array> {
 		const reader = (response.body as ReadableStream<Uint8Array>).getReader();
-		const chunks: Uint8Array[] = [];
+		// Grown geometrically and written in place. Collecting chunks and merging at the end
+		// peaks at **twice** the document's size — a 13 MB announcement costs 26 MB — on an
+		// instance with 512 MB shared between the API, the queue pools and pdf.js, where the
+		// symptom is the process dying rather than one attachment failing.
+		let buffer = new Uint8Array(64 * 1024);
 		let total = 0;
 
 		try {
@@ -115,7 +119,15 @@ export class DocumentDownloadService {
 						`document exceeded the ${this.config.maxBytes} byte limit while downloading`
 					);
 				}
-				chunks.push(value);
+				if (total > buffer.byteLength) {
+					const grown = new Uint8Array(
+						Math.min(Math.max(buffer.byteLength * 2, total), this.config.maxBytes)
+					);
+					grown.set(buffer.subarray(0, total - value.byteLength));
+					buffer = grown;
+				}
+
+				buffer.set(value, total - value.byteLength);
 			}
 		} finally {
 			// Releases the socket whether the read finished or was abandoned; without this an
@@ -127,14 +139,8 @@ export class DocumentDownloadService {
 			throw new DocumentUnavailableError(`GET ${url} returned an empty body`);
 		}
 
-		const merged = new Uint8Array(total);
-		let offset = 0;
-		for (const chunk of chunks) {
-			merged.set(chunk, offset);
-			offset += chunk.byteLength;
-		}
-
-		return merged;
+		// A view, not a copy — the reader only reads it.
+		return buffer.subarray(0, total);
 	}
 
 	private looksLikePdf(bytes: Uint8Array): boolean {
