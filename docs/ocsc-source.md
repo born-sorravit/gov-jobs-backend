@@ -11,7 +11,7 @@ it is the same publicly accessible information, but stable and already normalise
 
 No authentication, no cookies, no staff-only endpoint is used.
 `https://job.ocsc.go.th/robots.txt` disallows only `Bingbot`; no crawl-delay is declared.
-We still crawl at a low, configurable interval (`OCSC_CRAWL_INTERVAL_MINUTES`).
+We still crawl at a low, configurable interval (`CRAWLER_INTERVAL_MINUTES`).
 
 ## Endpoints
 
@@ -96,9 +96,39 @@ re-render ourselves).
 ```ts
 interface JobSourceCrawler {
 	readonly source: JobSource;
-	crawl(): Promise<RawJob[]>;
+	crawl(): Promise<CrawlResult>;
+	/** Refreshes the taxonomy labels this source's ids point at; 0 when it has none. */
+	syncReference(): Promise<number>;
 }
 ```
 
-`OcscCrawler` implements it. A new source adds a `JobSource` enum value and one class;
-`(source, external_id)` keeps ids from colliding, and nothing else in the pipeline changes.
+`crawl()` resolves with whatever it could normalise and reports the rest in `rejected` — one
+malformed announcement must never fail a run. It throws only when the *source* is unusable,
+which is what marks the run FAILED.
+
+`CrawlerRegistry` maps `JobSource` to the implementation. `CrawlerService` resolves through
+it rather than branching on `source`, which is what keeps matching, notifications and the
+document pipeline from ever learning that a new portal exists.
+
+The recipe:
+
+1. Add the `JobSource` enum value, and widen all three `*_source_enum` types in one
+   migration (`MultiSourceEnums1790079845524` is the pattern).
+2. Write the crawler, returning `NormalizedJob`s. A source with no taxonomy endpoints
+   returns 0 from `syncReference()` and leaves the `*_id` fields null — they are OCSC's
+   integer ids into `reference_item`, and nothing downstream requires them. `DolCrawler` is
+   the worked example for an HTML source: `dol.parser.ts` is pure and tested against captured
+   pages, `dol.crawler.ts` only fetches. Reuse `computeContentHash` from
+   `crawler/normalization.ts` — a second hash implementation that drifts would re-notify
+   every user about the entire back catalogue.
+   If the source mixes openings with results and notices, reuse `isRecruitmentAnnouncement`
+   from `crawler/recruitment-title.ts` and report the rest as `rejected`; the note there says
+   why the list is positive rather than negative. Widen the list there, not per source.
+   Free-text fields are canonicalised for you — `normalizeJobText` runs before the content
+   hash — but call it from the parser as the existing ones do, or the hash will describe text
+   that is not what gets stored.
+3. Add the class to `CRAWLER_PROVIDERS` in `crawler.module.ts`. That is the only wiring.
+4. It is now reachable at `POST /internal/crawler/run/:source` and included in `run-all`.
+
+`(source, external_id)` keeps ids from colliding. Nothing else in the pipeline changes —
+that is the property `crawler.registry.spec.ts` and the `run-all` tests exist to hold.

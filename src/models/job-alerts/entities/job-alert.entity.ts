@@ -1,7 +1,8 @@
 import { BaseEntity } from "@/models/base.entity";
 import { User } from "@/models/users/entities/user.entity";
 import { AlertFrequency } from "@/shared/enums/alert-frequency.enum";
-import { Column, Entity, Index, JoinColumn, ManyToOne } from "typeorm";
+import { newUnsubscribeToken } from "@/shared/utils/unsubscribe-token";
+import { BeforeInsert, Column, Entity, Index, JoinColumn, ManyToOne } from "typeorm";
 
 /**
  * A user's saved search plus a delivery schedule.
@@ -36,8 +37,23 @@ export class JobAlert extends BaseEntity {
 	@Column({ type: "int", array: true, default: () => "'{}'" })
 	provinces: number[];
 
+	/**
+	 * Always the owner account's email — the API has no way to set it to anything else, and
+	 * the account's own address is not editable, so it cannot drift afterwards.
+	 */
 	@Column({ name: "notification_email", type: "varchar", length: 255 })
 	notificationEmail: string;
+
+	/**
+	 * Bearer secret for switching this alert off from an email, with no account and no login.
+	 *
+	 * Unguessable and unique, so the link in one person's email cannot silence anyone else's
+	 * alert. Stored rather than derived from the id so it can be rotated, and so a leaked
+	 * link can be invalidated without deleting the alert.
+	 */
+	@Index("uq_job_alert_unsubscribe_token", { unique: true })
+	@Column({ name: "unsubscribe_token", type: "varchar", length: 64 })
+	unsubscribeToken: string;
 
 	@Column({
 		type: "enum",
@@ -60,4 +76,18 @@ export class JobAlert extends BaseEntity {
 
 	@Column({ name: "last_sent_at", type: "timestamptz", nullable: true })
 	lastSentAt: Date | null;
+
+	/**
+	 * The token is an invariant of the row, not something each caller has to remember.
+	 *
+	 * Generated here so no code path can create an alert that has no way to be switched off —
+	 * an alert without a token would mail someone a link that 404s, which is worse than
+	 * having no link at all.
+	 */
+	@BeforeInsert()
+	ensureUnsubscribeToken(): void {
+		if (!this.unsubscribeToken) {
+			this.unsubscribeToken = newUnsubscribeToken();
+		}
+	}
 }

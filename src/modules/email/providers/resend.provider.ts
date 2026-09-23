@@ -30,6 +30,7 @@ export class ResendEmailProvider implements EmailProvider {
 			html: message.html,
 			text: message.text,
 			replyTo: this.config.replyTo,
+			headers: message.headers,
 		});
 
 		// Resend reports failures in the body rather than by throwing, so this has to be

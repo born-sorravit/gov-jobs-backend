@@ -3,6 +3,7 @@ import { ModelModule } from "@/models/model.module";
 import { AuthModule } from "@/modules/auth/auth.module";
 import { AdminModule } from "@/modules/admin/admin.module";
 import { CrawlerModule } from "@/modules/crawler/crawler.module";
+import { DocumentsModule } from "@/modules/documents/documents.module";
 import { HealthController } from "@/modules/health/health.controller";
 import { JobAlertsModule } from "@/modules/job-alerts/job-alerts.module";
 import { NotificationsModule } from "@/modules/notifications/notifications.module";
@@ -43,6 +44,7 @@ import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 		ModelModule,
 		QueueModule,
 		CrawlerModule,
+		DocumentsModule,
 		AdminModule,
 		AuthModule,
 		JobsModule,

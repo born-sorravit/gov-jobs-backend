@@ -3,6 +3,12 @@ export interface EmailMessage {
 	subject: string;
 	html: string;
 	text: string;
+	/**
+	 * Raw SMTP headers, for the ones that have to be headers rather than body content —
+	 * `List-Unsubscribe` and `List-Unsubscribe-Post`, which is what makes a mail client show
+	 * its own unsubscribe button. A link in the footer alone does not.
+	 */
+	headers?: Record<string, string>;
 }
 
 export interface EmailSendResult {

@@ -7,8 +7,9 @@ import {
 } from "@/modules/crawler/interfaces/job-source-crawler.interface";
 import {
 	JobValidationError,
-	normalizeOcscJob,
-} from "@/modules/crawler/ocsc/ocsc.normalizer";
+	SourceUnavailableError,
+} from "@/modules/crawler/normalization";
+import { normalizeOcscJob } from "@/modules/crawler/ocsc/ocsc.normalizer";
 import { OcscRawJob, OcscRawReferenceRow } from "@/modules/crawler/ocsc/ocsc.types";
 import {
 	ReferenceItem,
@@ -18,6 +19,8 @@ import { ReferenceItemRepository } from "@/models/reference/reference-item.repos
 import { JobSource } from "@/shared/enums/job-source.enum";
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+
+export { SourceUnavailableError };
 
 /** Which lookup endpoint feeds which taxonomy, and where its Thai label lives. */
 const REFERENCE_ENDPOINTS: {
@@ -49,8 +52,6 @@ const REFERENCE_ENDPOINTS: {
 		labelField: "jobCondition",
 	},
 ];
-
-export class SourceUnavailableError extends Error {}
 
 @Injectable()
 export class OcscCrawler implements JobSourceCrawler {

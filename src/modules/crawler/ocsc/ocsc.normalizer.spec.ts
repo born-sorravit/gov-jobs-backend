@@ -1,8 +1,8 @@
 import {
 	JobValidationError,
 	computeContentHash,
-	normalizeOcscJob,
-} from "@/modules/crawler/ocsc/ocsc.normalizer";
+} from "@/modules/crawler/normalization";
+import { normalizeOcscJob } from "@/modules/crawler/ocsc/ocsc.normalizer";
 import { OcscRawJob } from "@/modules/crawler/ocsc/ocsc.types";
 import { JobSource } from "@/shared/enums/job-source.enum";
 import * as fs from "node:fs";

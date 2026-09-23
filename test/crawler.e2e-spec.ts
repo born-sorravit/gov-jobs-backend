@@ -2,7 +2,10 @@ import { AppModule } from "@/app.module";
 import { CrawlerRun } from "@/models/crawler/entities/crawler-run.entity";
 import { JobAttachment } from "@/models/jobs/entities/job-attachment.entity";
 import { Job } from "@/models/jobs/entities/job.entity";
-import { CrawlerService } from "@/modules/crawler/crawler.service";
+import { CrawlerRegistry } from "@/modules/crawler/crawler.registry";
+import { CrawlerService, RunAllSummary } from "@/modules/crawler/crawler.service";
+import { DolCrawler } from "@/modules/crawler/dol/dol.crawler";
+import { MdesCrawler } from "@/modules/crawler/mdes/mdes.crawler";
 import {
 	CrawlResult,
 	JobSourceCrawler,
@@ -14,6 +17,7 @@ import {
 import { normalizeOcscJob } from "@/modules/crawler/ocsc/ocsc.normalizer";
 import { OcscRawJob } from "@/modules/crawler/ocsc/ocsc.types";
 import { CrawlerRunStatus } from "@/shared/enums/crawler-run-status.enum";
+import { ExtractionStatus } from "@/shared/enums/extraction.enum";
 import { JobSource } from "@/shared/enums/job-source.enum";
 import { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
@@ -78,11 +82,36 @@ class FakeOcscCrawler implements JobSourceCrawler {
 	}
 }
 
+/**
+ * Stands in for the HTML sources so `run-all` has more than one without the suite reaching
+ * the live sites. Every source-specific assertion lives in that source's parser spec, against
+ * captured HTML; what matters here is only that each registered source takes its turn.
+ */
+class FakeCrawler implements JobSourceCrawler {
+	failWith: Error | null = null;
+	crawls = 0;
+
+	constructor(readonly source: JobSource) {}
+
+	async crawl(): Promise<CrawlResult> {
+		this.crawls += 1;
+		if (this.failWith) throw this.failWith;
+		return { jobs: [], rejected: [], totalFound: 0 };
+	}
+
+	async syncReference(): Promise<number> {
+		return 0;
+	}
+}
+
 describe("OCSC crawl pipeline", () => {
 	let app: INestApplication;
 	let dataSource: DataSource;
 	let crawler: CrawlerService;
+	let registry: CrawlerRegistry;
 	let fake: FakeOcscCrawler;
+	let fakeDol: FakeCrawler;
+	let fakeMdes: FakeCrawler;
 
 	/** A small, stable slice of the real snapshot. */
 	const sample = (count: number): OcscRawJob[] =>
@@ -110,22 +139,34 @@ describe("OCSC crawl pipeline", () => {
 			await dataSource.getRepository(Job).delete(jobs.map((j) => j.id));
 		}
 		// Only the runs this file created — a real crawl's audit trail must survive.
-		await dataSource
-			.getRepository(CrawlerRun)
-			.delete({ source: JobSource.OCSC, trigger: "test" });
+		// Scoped by source as well as trigger: `trigger` is free text with no namespacing, and
+		// the source filter is what keeps this from ever reaching a run this file did not make.
+		await dataSource.getRepository(CrawlerRun).delete({
+			source: In([JobSource.OCSC, JobSource.DOL, JobSource.MDES]),
+			trigger: In(["test", "test-run-all"]),
+		});
 	};
 
 	beforeAll(async () => {
 		fake = new FakeOcscCrawler();
+		fakeDol = new FakeCrawler(JobSource.DOL);
+		fakeMdes = new FakeCrawler(JobSource.MDES);
 		const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
 			.overrideProvider(OcscCrawler)
 			.useValue(fake)
+			// Faked for the same reason as OCSC: a suite that reaches กรมที่ดิน over the network
+			// is neither deterministic nor polite to run on every commit.
+			.overrideProvider(DolCrawler)
+			.useValue(fakeDol)
+			.overrideProvider(MdesCrawler)
+			.useValue(fakeMdes)
 			.compile();
 
 		app = moduleRef.createNestApplication();
 		await app.init();
 		dataSource = app.get(DataSource);
 		crawler = app.get(CrawlerService);
+		registry = app.get(CrawlerRegistry);
 		await cleanUp();
 	}, 60_000);
 
@@ -133,6 +174,8 @@ describe("OCSC crawl pipeline", () => {
 		await cleanUp();
 		fake.failWith = null;
 		fake.delayMs = 0;
+		fakeDol.failWith = null;
+		fakeMdes.failWith = null;
 	});
 
 	afterAll(async () => {
@@ -270,6 +313,117 @@ describe("OCSC crawl pipeline", () => {
 		expect(attachments[0].url).toBe("https://job.ocsc.go.th/upload2/job-99999.pdf");
 	});
 
+	/**
+	 * An attachment is identified by its URL, so a row whose URL still appears is kept rather
+	 * than replaced — which used to mean its name could never change. That became a real gap
+	 * once free text started being canonicalised: a name stored in the older spelling would
+	 * have kept it forever, because nothing about the URL moved.
+	 */
+	it("updates an attachment's name in place when only the name changed", async () => {
+		fake.raw = sample(1);
+		await crawler.run(JobSource.OCSC, "test");
+
+		const [job] = await storedJobs(fake.raw);
+		const repository = dataSource.getRepository(JobAttachment);
+		const [before] = await repository.find({ where: { jobId: job.id } });
+
+		// Stand in for a row written before normalisation: same URL, older spelling.
+		await repository.update(before.id, { name: "ประกาศรับสม\u0E4D\u0E32คร" });
+
+		fake.raw = sample(1);
+		fake.raw[0].applicationEnd = "2099-10-31"; // force a content change so the job is re-persisted
+		await crawler.run(JobSource.OCSC, "test");
+
+		const after = await repository.find({ where: { jobId: job.id } });
+		expect(after).toHaveLength(1);
+		expect(after[0].id).toBe(before.id); // updated, not deleted and reinserted
+		expect(after[0].name).toBe("ประกาศรับสมัคร");
+	});
+
+	/**
+	 * The crawl's hand-off to document processing. The extraction itself is unit-tested
+	 * against real PDFs; what only the container shows is that imported attachments arrive
+	 * PENDING and are actually offered to the queue.
+	 */
+	it("imports attachments PENDING and hands them to the document queue", async () => {
+		fake.raw = sample(3);
+
+		const summary = await crawler.run(JobSource.OCSC, "test");
+
+		const jobs = await storedJobs(fake.raw);
+		const attachments = await dataSource
+			.getRepository(JobAttachment)
+			.find({ where: { jobId: In(jobs.map((job) => job.id)) } });
+
+		expect(attachments.length).toBeGreaterThan(0);
+		expect(summary.documentsEnqueued).toBe(attachments.length);
+		for (const attachment of attachments) {
+			expect(attachment.extractionStatus).toBe(ExtractionStatus.PENDING);
+			expect(attachment.extractedText).toBeNull();
+			expect(attachment.fileHash).toBeNull();
+		}
+	});
+
+	/**
+	 * The gap this closed: an attachment is unread for reasons unrelated to its announcement
+	 * moving — imported before extraction existed, reset after a failed download, or worth
+	 * reading again with a better parser. Scoping the sweep to changed announcements left
+	 * every one of those unread forever, because their announcements never change again.
+	 */
+	it("picks up an unread attachment even when its announcement did not change", async () => {
+		fake.raw = sample(2);
+		await crawler.run(JobSource.OCSC, "test");
+
+		const jobs = await storedJobs(fake.raw);
+		const repository = dataSource.getRepository(JobAttachment);
+		await repository.update(
+			{ jobId: In(jobs.map((job) => job.id)) },
+			{ extractionStatus: ExtractionStatus.COMPLETED, extractedText: "เดิม" }
+		);
+
+		// Reset one, as re-processing would, and change nothing about the announcement.
+		const [first] = await repository.find({
+			where: { jobId: In(jobs.map((job) => job.id)) },
+		});
+		await repository.update(first.id, {
+			extractionStatus: ExtractionStatus.PENDING,
+		});
+
+		fake.raw = sample(2);
+		const summary = await crawler.run(JobSource.OCSC, "test");
+
+		expect(summary.unchangedJobs).toBe(2);
+		expect(summary.documentsEnqueued).toBeGreaterThanOrEqual(1);
+	});
+
+	/** A document already read keeps its text; re-crawling must not queue it again. */
+	it("does not re-enqueue an attachment that has already been read", async () => {
+		fake.raw = sample(2);
+		await crawler.run(JobSource.OCSC, "test");
+
+		const jobs = await storedJobs(fake.raw);
+		const repository = dataSource.getRepository(JobAttachment);
+		await repository.update(
+			{ jobId: In(jobs.map((job) => job.id)) },
+			{
+				extractionStatus: ExtractionStatus.COMPLETED,
+				extractedText: "เนื้อหาประกาศที่อ่านไว้แล้ว",
+			}
+		);
+
+		fake.raw = sample(2);
+		fake.raw[0].applicationEnd = "2099-09-30"; // force a re-persist
+		const summary = await crawler.run(JobSource.OCSC, "test");
+
+		expect(summary.documentsEnqueued).toBe(0);
+		const after = await repository.find({
+			where: { jobId: In(jobs.map((job) => job.id)) },
+		});
+		for (const attachment of after) {
+			expect(attachment.extractedText).toBe("เนื้อหาประกาศที่อ่านไว้แล้ว");
+		}
+	});
+
 	describe("failure isolation", () => {
 		it("skips a malformed announcement and keeps the rest", async () => {
 			fake.raw = [
@@ -349,5 +503,84 @@ describe("OCSC crawl pipeline", () => {
 		await crawler.run(JobSource.OCSC, "test");
 
 		expect(fake.referenceSyncs).toBe(before + 1);
+	});
+
+	/**
+	 * `runAll`'s branching is unit-tested against mocks; what only the real container can
+	 * show is that the registry is wired to the same crawler instances `run` uses — the
+	 * factory behind `JOB_SOURCE_CRAWLERS` resolves its providers through Nest, so an
+	 * overridden provider has to reach it or these assertions fail.
+	 */
+	describe("run-all", () => {
+		it("registers exactly the sources that have a crawler", () => {
+			expect(registry.sources()).toEqual([
+				JobSource.OCSC,
+				JobSource.DOL,
+				JobSource.MDES,
+			]);
+			// Still in the enum, still without a crawler — the 404 case.
+			expect(registry.has(JobSource.ADMIN_COURT)).toBe(false);
+		});
+
+		/** The summary entry for one source, so these read the same however many are registered. */
+		const runFor = (summary: RunAllSummary, source: JobSource) =>
+			summary.runs.find((run) => run.source === source);
+
+		it("gives every registered source a turn and persists what they return", async () => {
+			fake.raw = sample(4);
+
+			const summary = await crawler.runAll("test-run-all");
+
+			expect(summary).toMatchObject({
+				totalSources: registry.sources().length,
+				failed: 0,
+				skipped: 0,
+			});
+			expect(summary.succeeded).toBe(registry.sources().length);
+			expect(runFor(summary, JobSource.OCSC)).toMatchObject({
+				status: CrawlerRunStatus.SUCCESS,
+				newJobs: 4,
+			});
+			expect(fakeDol.crawls).toBe(1);
+			expect(fakeMdes.crawls).toBe(1);
+			expect(await storedJobs(fake.raw)).toHaveLength(4);
+		});
+
+		/** Requirement 29, against real SQL: DOL failing must not cost OCSC its run. */
+		it("keeps crawling the other sources after one fails", async () => {
+			fake.raw = sample(2);
+			fakeDol.failWith = new SourceUnavailableError("DOL listing returned 503");
+
+			const summary = await crawler.runAll("test-run-all");
+
+			expect(summary).toMatchObject({ failed: 1, skipped: 0 });
+			expect(runFor(summary, JobSource.DOL)).toMatchObject({
+				status: CrawlerRunStatus.FAILED,
+			});
+			expect(runFor(summary, JobSource.OCSC)).toMatchObject({
+				status: CrawlerRunStatus.SUCCESS,
+				newJobs: 2,
+			});
+		});
+
+		it("skips a source whose crawl is still in flight and runs the rest", async () => {
+			fake.raw = sample(2);
+			fake.delayMs = 1500;
+
+			const inFlight = crawler.run(JobSource.OCSC, "test");
+			await new Promise((r) => setTimeout(r, 200));
+
+			const summary = await crawler.runAll("test-run-all");
+
+			expect(summary).toMatchObject({ failed: 0, skipped: 1 });
+			expect(summary.skippedSources[0]).toMatchObject({ source: JobSource.OCSC });
+			// The source behind the blocked one still got its turn.
+			expect(runFor(summary, JobSource.DOL)).toMatchObject({
+				status: CrawlerRunStatus.SUCCESS,
+			});
+			await expect(inFlight).resolves.toMatchObject({
+				status: CrawlerRunStatus.SUCCESS,
+			});
+		});
 	});
 });

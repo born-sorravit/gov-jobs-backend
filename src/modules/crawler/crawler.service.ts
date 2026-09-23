@@ -1,24 +1,27 @@
+import { DocumentConfig } from "@/config/configuration";
 import { CrawlerRun } from "@/models/crawler/entities/crawler-run.entity";
 import { CrawlerRunRepository } from "@/models/crawler/crawler-run.repository";
 import { JobAttachment } from "@/models/jobs/entities/job-attachment.entity";
 import { Job } from "@/models/jobs/entities/job.entity";
 import { JobAttachmentRepository } from "@/models/jobs/job-attachment.repository";
 import { JobRepository } from "@/models/jobs/job.repository";
+import { CrawlerRegistry } from "@/modules/crawler/crawler.registry";
+import { NormalizedJob } from "@/modules/crawler/interfaces/job-source-crawler.interface";
 import {
-	JobSourceCrawler,
-	NormalizedJob,
-} from "@/modules/crawler/interfaces/job-source-crawler.interface";
-import {
+	DocumentJobPayload,
 	MatchJobPayload,
+	QUEUE_DOCUMENT_PROCESSING,
 	QUEUE_JOB_MATCHING,
+	documentJobId,
 	matchJobId,
 } from "@/constants/queue.constants";
 import { ReferenceService } from "@/modules/reference/reference.service";
-import { OcscCrawler } from "@/modules/crawler/ocsc/ocsc.crawler";
 import { CrawlerRunStatus } from "@/shared/enums/crawler-run-status.enum";
+import { ExtractionStatus } from "@/shared/enums/extraction.enum";
 import { JobSource } from "@/shared/enums/job-source.enum";
 import { InjectQueue } from "@nestjs/bullmq";
 import { ConflictException, Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { Queue } from "bullmq";
 import { DeepPartial, In, LessThan } from "typeorm";
 import { QueryDeepPartialEntity } from "typeorm/query-builder/QueryPartialEntity";
@@ -37,10 +40,34 @@ export interface CrawlSummary {
 	 * when the crawl returns — workers write it to `CrawlerRun.alertMatches` as they finish.
 	 */
 	matchingEnqueued: number;
+	/**
+	 * Unread attachments offered to the document queue. The extracted text is not available
+	 * when a crawl returns — the worker writes it to `job_attachment` as it goes.
+	 */
+	documentsEnqueued: number;
 	durationMs: number;
 	errorMessage: string | null;
 	/** Ids of announcements that were inserted or materially changed by this run. */
 	changedJobIds: string[];
+}
+
+/** A source `run-all` did not attempt, and why. Never an error — just a non-event. */
+export interface SkippedSource {
+	source: JobSource;
+	reason: string;
+}
+
+export interface RunAllSummary {
+	/** Sources with a registered crawler at the time of the call. */
+	totalSources: number;
+	succeeded: number;
+	failed: number;
+	/** Sources whose previous crawl was still in flight. */
+	skipped: number;
+	durationMs: number;
+	/** One entry per source that actually started, in the order they ran. */
+	runs: CrawlSummary[];
+	skippedSources: SkippedSource[];
 }
 
 /** A run still marked RUNNING after this long is assumed dead and released. */
@@ -49,7 +76,7 @@ const STALE_RUN_MINUTES = 30;
 @Injectable()
 export class CrawlerService {
 	private readonly logger = new Logger(CrawlerService.name);
-	private readonly crawlers: Map<JobSource, JobSourceCrawler>;
+	private readonly documentBatchSize: number;
 
 	constructor(
 		private readonly crawlerRunRepository: CrawlerRunRepository,
@@ -57,10 +84,14 @@ export class CrawlerService {
 		private readonly jobAttachmentRepository: JobAttachmentRepository,
 		@InjectQueue(QUEUE_JOB_MATCHING)
 		private readonly matchingQueue: Queue<MatchJobPayload>,
+		@InjectQueue(QUEUE_DOCUMENT_PROCESSING)
+		private readonly documentQueue: Queue<DocumentJobPayload>,
 		private readonly referenceService: ReferenceService,
-		ocscCrawler: OcscCrawler
+		private readonly registry: CrawlerRegistry,
+		configService: ConfigService
 	) {
-		this.crawlers = new Map([[ocscCrawler.source, ocscCrawler as JobSourceCrawler]]);
+		this.documentBatchSize =
+			configService.getOrThrow<DocumentConfig>("document").batchSize;
 	}
 
 	/**
@@ -72,10 +103,9 @@ export class CrawlerService {
 	 * turns into a 409 because it means "nothing happened", not "something broke".
 	 */
 	async run(source: JobSource, trigger: string): Promise<CrawlSummary> {
-		const crawler = this.crawlers.get(source);
-		if (!crawler) {
-			throw new ConflictException(`No crawler registered for source ${source}`);
-		}
+		// Throws NotFoundException for a source with no crawler in this build. Deliberately
+		// before the run row is claimed: an unsupported source must leave no audit trail.
+		const crawler = this.registry.get(source);
 
 		await this.releaseStaleRuns(source);
 		const run = await this.startRun(source, trigger);
@@ -95,6 +125,9 @@ export class CrawlerService {
 			// Handed to the queue rather than run here: a failure then retries one announcement
 			// instead of the whole crawl, and the request is not held open for the work.
 			const matchingEnqueued = await this.enqueueMatching(changedJobIds, run.id);
+			// Reading a PDF takes seconds and can fail on its own; it has no business holding
+			// the crawl open, and a document that cannot be read must not make the run FAILED.
+			const documentsEnqueued = await this.enqueueDocuments();
 
 			const summary: CrawlSummary = {
 				runId: run.id,
@@ -106,6 +139,7 @@ export class CrawlerService {
 				unchangedJobs,
 				skippedJobs: rejected.length,
 				matchingEnqueued,
+				documentsEnqueued,
 				durationMs: Date.now() - startedAt,
 				errorMessage: null,
 				changedJobIds,
@@ -123,7 +157,8 @@ export class CrawlerService {
 
 			this.logger.log(
 				`${source} crawl done in ${summary.durationMs}ms: ${totalFound} found, ` +
-					`${newJobs} new, ${updatedJobs} updated, ${unchangedJobs} unchanged, ${rejected.length} skipped, ${matchingEnqueued} queued for matching`
+					`${newJobs} new, ${updatedJobs} updated, ${unchangedJobs} unchanged, ${rejected.length} skipped, ` +
+					`${matchingEnqueued} queued for matching, ${documentsEnqueued} for extraction`
 			);
 
 			return summary;
@@ -147,11 +182,65 @@ export class CrawlerService {
 				unchangedJobs: 0,
 				skippedJobs: 0,
 				matchingEnqueued: 0,
+				documentsEnqueued: 0,
 				durationMs: Date.now() - startedAt,
 				errorMessage,
 				changedJobIds: [],
 			};
 		}
+	}
+
+	/**
+	 * Runs every registered source, one after another.
+	 *
+	 * Sequential rather than concurrent: the deployment is a single small instance, and two
+	 * crawls competing for its memory and its one database connection pool is a worse trade
+	 * than a longer wall clock on a job nothing is waiting for. The per-source partial unique
+	 * index would permit concurrency later without any other change.
+	 *
+	 * Failure isolation is the point of the method. `run` already absorbs a crawl failure
+	 * into a FAILED summary, but it still throws `ConflictException` when that source's
+	 * previous crawl has not finished — so without this catch one source stuck mid-crawl
+	 * would abort every source queued behind it. Requirement 29.
+	 */
+	async runAll(trigger: string): Promise<RunAllSummary> {
+		const startedAt = Date.now();
+		const sources = this.registry.sources();
+		const runs: CrawlSummary[] = [];
+		const skippedSources: SkippedSource[] = [];
+
+		for (const source of sources) {
+			try {
+				runs.push(await this.run(source, trigger));
+			} catch (error) {
+				// Anything reaching here is "this source did not run", not "the batch broke":
+				// an overlapping run, or a crawler deregistered between `sources()` and now.
+				const reason = error instanceof Error ? error.message : String(error);
+				skippedSources.push({ source, reason });
+				this.logger.warn(`Skipped ${source}: ${reason}`);
+			}
+		}
+
+		const failed = runs.filter(
+			(run) => run.status === CrawlerRunStatus.FAILED
+		).length;
+
+		const summary: RunAllSummary = {
+			totalSources: sources.length,
+			succeeded: runs.length - failed,
+			failed,
+			skipped: skippedSources.length,
+			durationMs: Date.now() - startedAt,
+			runs,
+			skippedSources,
+		};
+
+		this.logger.log(
+			`run-all done in ${summary.durationMs}ms across ${sources.length} source(s): ` +
+				`${summary.succeeded} succeeded, ${failed} failed, ${summary.skipped} skipped`
+		);
+
+		return summary;
 	}
 
 	/**
@@ -225,6 +314,54 @@ export class CrawlerService {
 		);
 
 		return jobs.length;
+	}
+
+	/**
+	 * Hands unread attachments to the document queue, oldest first.
+	 *
+	 * **Deliberately not restricted to the announcements this crawl changed.** An attachment
+	 * is unread for reasons that have nothing to do with its announcement moving: it was
+	 * imported before extraction existed, its download failed and was reset, or a better
+	 * parser means it is worth reading again. Scoping to changed announcements would leave
+	 * every one of those unread forever, because their announcements never change again.
+	 *
+	 * Re-processing anything is therefore `UPDATE job_attachment SET extraction_status =
+	 * 'PENDING'`, and the next crawl picks it up.
+	 *
+	 * Capped per crawl: the first run after this shipped finds every existing attachment
+	 * unread. The job id is derived from the attachment, so a crawl that re-offers one still
+	 * in the queue adds nothing — BullMQ drops a duplicate id outright.
+	 */
+	private async enqueueDocuments(): Promise<number> {
+		const attachments = await this.jobAttachmentRepository.find({
+			where: { extractionStatus: ExtractionStatus.PENDING },
+			select: { id: true },
+			order: { createdAt: "ASC" },
+			take: this.documentBatchSize,
+		});
+		if (attachments.length === 0) return 0;
+
+		await this.documentQueue.addBulk(
+			attachments.map((attachment) => ({
+				name: "extract",
+				data: { attachmentId: attachment.id },
+				opts: {
+					jobId: documentJobId(attachment.id),
+					/**
+					 * Dropped as soon as it succeeds, unlike the shared 24-hour retention.
+					 *
+					 * The id is derived from the attachment, so a *completed* job left sitting
+					 * in the queue makes every later attempt at that attachment a duplicate and
+					 * silently discards it — which would make re-processing impossible for a
+					 * day. Removing on completion narrows the deduplication to what it is
+					 * actually for: not queueing the same document twice while one is pending.
+					 */
+					removeOnComplete: true,
+				},
+			}))
+		);
+
+		return attachments.length;
 	}
 
 	private async persist(jobs: NormalizedJob[]): Promise<{
@@ -304,6 +441,29 @@ export class CrawlerService {
 
 		if (staleIds.length > 0) {
 			await this.jobAttachmentRepository.delete(staleIds);
+		}
+
+		/**
+		 * The URL is the identity of an attachment, so a row whose URL still appears is kept
+		 * rather than replaced — but its *name* and *type* can still have changed, and until
+		 * this loop existed they never did. That matters now that free text is canonicalised:
+		 * a name stored before normalisation would otherwise keep its old spelling forever,
+		 * because nothing about the URL moved.
+		 */
+		const byUrl = new Map(
+			existing.map((attachment) => [attachment.url, attachment])
+		);
+		for (const attachment of wanted) {
+			const current = byUrl.get(attachment.url);
+			if (!current) continue;
+			if (current.name === attachment.name && current.type === attachment.type) {
+				continue;
+			}
+
+			await this.jobAttachmentRepository.update(current.id, {
+				name: attachment.name,
+				type: attachment.type as JobAttachment["type"],
+			});
 		}
 
 		const existingUrls = new Set(existing.map((attachment) => attachment.url));

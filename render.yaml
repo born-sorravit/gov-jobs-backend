@@ -46,6 +46,12 @@ services:
         sync: false
       - key: PUBLIC_WEB_URL
         sync: false
+      # This API's own public origin (https://<service>.onrender.com, no path). The
+      # unsubscribe link in alert emails points here rather than at the web app, so it keeps
+      # working through a frontend redeploy — an unsubscribe that 404s is the complaint the
+      # link exists to prevent.
+      - key: PUBLIC_API_URL
+        sync: false
 
       # --- Database --------------------------------------------------------
       # Supabase *session* pooler URI (port 5432). The transaction pooler (6543) silently
@@ -102,15 +108,52 @@ services:
         value: https://job.ocsc.go.th/portal
       - key: OCSC_TIMEOUT_MS
         value: "30000"
-      # The source is a public portal; identify the crawler honestly so they can find us.
-      - key: OCSC_USER_AGENT
+      # The sources are public portals; identify the crawler honestly so they can find us.
+      - key: CRAWLER_USER_AGENT
         value: "gov-jobs-alert/1.0 (+https://github.com/born-sorravit/gov-jobs-backend; public job announcement aggregator)"
+      # กรมที่ดิน — HTML listing, no API. Only the newest pages are swept each crawl.
+      - key: DOL_LISTING_URL
+        value: https://www.dol.go.th/department-news/activity-updates/personnel-divisions-news/examination
+      - key: DOL_LISTING_PAGES
+        value: "2"
+      - key: DOL_TIMEOUT_MS
+        value: "30000"
+      # กระทรวงดิจิทัลเพื่อเศรษฐกิจและสังคม — "สมัครงาน" category, HTML only.
+      - key: MDES_LISTING_URL
+        value: https://mdes.go.th/news/7
+      - key: MDES_LISTING_PAGES
+        value: "2"
+      - key: MDES_TIMEOUT_MS
+        value: "30000"
+      # MDES 403s on a burst and recovers on its own; space the crawl out instead.
+      - key: MDES_REQUEST_DELAY_MS
+        value: "800"
       # Only read when the in-process scheduler is on, which it is not here. Kept so this
-      # file mirrors .env.example rather than quietly omitting a knob.
-      - key: OCSC_CRAWL_INTERVAL_MINUTES
+      # file mirrors .env.example rather than quietly omitting a knob. One interval for
+      # every source: the scheduler crawls them in sequence.
+      - key: CRAWLER_INTERVAL_MINUTES
         value: "60"
       # Deliberately off — see the note at the top of this file.
       - key: CRAWLER_SCHEDULER_ENABLED
+        value: "false"
+
+      # --- Document processing ---------------------------------------------
+      # The PDF reader shares this instance with the API. Anything larger is refused rather
+      # than loaded; DOL's largest announcement so far is ~14 MB.
+      - key: DOCUMENT_MAX_BYTES
+        value: "26214400"
+      - key: DOCUMENT_MIN_TEXT_LENGTH
+        value: "200"
+      - key: DOCUMENT_TIMEOUT_MS
+        value: "60000"
+      # Unread attachments offered per crawl. The backlog drains a batch at a time rather
+      # than all at once on the first run after deploy.
+      - key: DOCUMENT_BATCH_SIZE
+        value: "50"
+      # Off on evidence — see the note in .env.example and the README. Matching document text
+      # duplicates notifications on OCSC, which splits one announcement into one row per
+      # position with a shared PDF.
+      - key: DOCUMENT_MATCH_TEXT
         value: "false"
 
       # --- Email -----------------------------------------------------------

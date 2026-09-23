@@ -29,6 +29,34 @@ export const isoWeekKey = (date: Date): string => {
 	return `${target.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
 };
 
+/**
+ * What makes two matched announcements "the same announcement".
+ *
+ * OCSC publishes a multi-position recruitment as **one job row per position**, every one of
+ * them carrying the same PDF — 7 documents across 38 of the 54 rows currently stored. Without
+ * grouping, a reader whose alert matches three of those positions gets three emails about one
+ * announcement.
+ *
+ * The key is the attachment **URL**, not `file_hash`: the hash only exists once the document
+ * has been downloaded, which happens on a queue *after* matching, so it is reliably null at
+ * exactly the moment a fresh announcement is emailed. Both produce identical grouping on the
+ * corpus (7 groups, 38 rows). Mixing them would be worse than either — mid-extraction some
+ * attachments of one announcement have a hash and others do not, so they would split.
+ *
+ * The rule is deliberately **not transitive**: a job is grouped by its first attachment URL
+ * alone, so A-shares-with-B and B-shares-with-C never merges A and C. Nothing in the corpus
+ * needs that, and it would produce surprising merges.
+ *
+ * A job with no attachment is its own announcement, which is the old behaviour exactly.
+ */
+const announcementKey = (match: JobAlertMatch): string => {
+	const urls = (match.job?.attachments ?? [])
+		.map((attachment) => attachment.url)
+		.sort();
+
+	return urls[0] ?? `job:${match.jobId}`;
+};
+
 @Injectable()
 export class NotificationDispatchService {
 	private readonly logger = new Logger(NotificationDispatchService.name);
@@ -51,7 +79,9 @@ export class NotificationDispatchService {
 
 		const matches = await this.jobAlertMatchRepository.find({
 			where: { id: In(matchIds), notifiedAt: IsNull() },
-			relations: { jobAlert: true },
+			// The announcement's documents decide which matches belong together — see
+			// `announcementKey`.
+			relations: { jobAlert: true, job: { attachments: true } },
 		});
 
 		const immediate = matches.filter(
@@ -61,19 +91,33 @@ export class NotificationDispatchService {
 		);
 		if (immediate.length === 0) return 0;
 
+		const groups = new Map<string, JobAlertMatch[]>();
+		for (const match of immediate) {
+			const key = `${match.jobAlertId}|${announcementKey(match)}`;
+			const group = groups.get(key);
+			if (group) group.push(match);
+			else groups.set(key, [match]);
+		}
+
 		await this.emailQueue.addBulk(
-			immediate.map((match) => ({
-				name: "immediate",
-				data: {
-					kind: "immediate" as const,
-					jobAlertId: match.jobAlertId,
-					matchIds: [match.id],
-				},
-				opts: { jobId: immediateEmailJobId(match.id) },
-			}))
+			[...groups.values()].map((group) => {
+				const ids = group.map((match) => match.id);
+				return {
+					name: "immediate",
+					data: {
+						kind: "immediate" as const,
+						jobAlertId: group[0].jobAlertId,
+						matchIds: ids,
+					},
+					opts: { jobId: immediateEmailJobId(ids) },
+				};
+			})
 		);
 
-		return immediate.length;
+		this.logger.log(
+			`Queued ${groups.size} immediate email(s) for ${immediate.length} match(es)`
+		);
+		return groups.size;
 	}
 
 	/**

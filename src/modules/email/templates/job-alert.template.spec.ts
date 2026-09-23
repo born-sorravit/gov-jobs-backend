@@ -63,6 +63,7 @@ const input = (overrides: Partial<JobAlertEmailInput> = {}): JobAlertEmailInput 
 	labels: LABELS,
 	webUrl: "https://example.test",
 	manageUrl: "https://example.test/alerts",
+	unsubscribeUrl: "https://api.example.test/api/v1/alerts/unsubscribe?token=tok-123",
 	...overrides,
 });
 

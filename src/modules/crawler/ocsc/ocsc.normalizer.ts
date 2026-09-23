@@ -2,12 +2,14 @@ import {
 	NormalizedAttachment,
 	NormalizedJob,
 } from "@/modules/crawler/interfaces/job-source-crawler.interface";
+import {
+	JobValidationError,
+	computeContentHash,
+	normalizeJobText,
+} from "@/modules/crawler/normalization";
 import { OcscRawJob } from "@/modules/crawler/ocsc/ocsc.types";
 import { JobSource } from "@/shared/enums/job-source.enum";
 import { parseBangkokTimestamp, toDateString } from "@/shared/utils/date.util";
-import { createHash } from "node:crypto";
-
-export class JobValidationError extends Error {}
 
 const text = (value: unknown): string | null => {
 	if (typeof value !== "string") return null;
@@ -54,63 +56,6 @@ const intArray = (value: unknown): number[] => {
 		.map(int)
 		.filter((entry): entry is number => entry !== null)
 		.sort((a, b) => a - b);
-};
-
-/**
- * Fields the hash is computed over, and the only ones that mean "this announcement
- * changed". Deliberately excludes `webView`/`mobileView` (they move on every request),
- * `lastSeenAt`, and anything we derive rather than receive.
- */
-const HASHED_FIELDS = [
-	"title",
-	"agency",
-	"ministry",
-	"agencyExternalId",
-	"agencySealUrl",
-	"jobCategoryId",
-	"jobCategoryOther",
-	"jobTypeId",
-	"jobTypeOther",
-	"jobLevelId",
-	"jobLevelOther",
-	"jobSelectionId",
-	"jobSelectionOther",
-	"jobConditionId",
-	"jobConditionOther",
-	"provinceIds",
-	"educationLevelIds",
-	"educationLevelOther",
-	"description",
-	"educationRequirements",
-	"knowledge",
-	"skill",
-	"competency",
-	"criteria",
-	"salaryMin",
-	"salaryMax",
-	"positionAmount",
-	"applicationStart",
-	"applicationEnd",
-	"examDate",
-	"interviewDate",
-	"applyUrl",
-] as const;
-
-/**
- * SHA-256 over a canonical serialisation of the fields above.
- *
- * Keys are sorted explicitly rather than relying on object insertion order: the day someone
- * reorders a field in the normaliser, insertion-order hashing would report all 51
- * announcements as changed and re-enqueue matching for every one of them.
- */
-export const computeContentHash = (
-	job: Omit<NormalizedJob, "contentHash">
-): string => {
-	const canonical = [...HASHED_FIELDS]
-		.sort()
-		.map((field) => [field, (job as Record<string, unknown>)[field] ?? null]);
-
-	return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 };
 
 export interface OcscNormalizerOptions {
@@ -212,5 +157,8 @@ export const normalizeOcscJob = (
 		attachments,
 	};
 
-	return { ...withoutHash, contentHash: computeContentHash(withoutHash) };
+	// Canonical Thai before hashing, so the hash describes the text that is stored and a
+	// keyword matches whichever way the source happened to spell it.
+	const normalized = normalizeJobText(withoutHash);
+	return { ...normalized, contentHash: computeContentHash(normalized) };
 };

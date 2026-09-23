@@ -128,13 +128,64 @@ Two rules that the schema encodes:
 
 ## Crawler
 
-`JobSourceCrawler` is the seam; `OcscCrawler` is the only implementation today. A crawl is
-one HTTP request — the list endpoint returns every currently-listed announcement in full,
-and the detail endpoint adds nothing but view counters (verified, see `docs/ocsc-source.md`).
+`JobSourceCrawler` is the seam and `CrawlerRegistry` holds the implementations, keyed by
+`JobSource`.
+
+| Source | Shape | Notes |
+| --- | --- | --- |
+| `OCSC` (สำนักงาน ก.พ.) | JSON API | One request — the list endpoint returns every currently-listed announcement in full, and the detail endpoint adds nothing but view counters (verified, see `docs/ocsc-source.md`). |
+| `DOL` (กรมที่ดิน) | HTML + PDF | No API. A paginated news listing, then one announcement page per entry for its PDF. |
+| `MDES` (กระทรวงดิจิทัลเพื่อเศรษฐกิจและสังคม) | HTML + PDF | Same shape as DOL. Attachments come from an extensionless `content/download-detail/{id}` endpoint, so they are found by path rather than by a `.pdf` suffix. |
+| `ADMIN_COURT`, `DOE` | — | Enum values with no crawler. `run/:source` answers 404 for these. |
+
+**`DOE` is out of scope, not merely unwritten.** กรมการจัดหางาน's "ประกาศรับสมัครงาน"
+category is its *placement service* — recruiting jobseekers for private overseas employers
+(Singapore Airlines, Scoot, Macau). Those are not government jobs. A live sweep of the
+category feed found 4 overseas placements, 1 eligibility list and 0 open civil-service
+postings, so a crawler for it would import either nothing or the wrong thing. Revisit if DOE
+starts publishing its own recruitment somewhere readable.
+
+**`ADMIN_COURT` is blocked, not merely unwritten.** admincourt.go.th sits behind Imperva
+bot protection that rejects every non-browser client, `robots.txt` included. Getting past it
+means defeating bot management, which is out of bounds; it needs another route (a feed, a
+data request, a contact at the court) before a crawler is worth writing.
+
+Adding a source touches `CrawlerModule` and nothing else. `CrawlerService` resolves crawlers
+through the registry rather than branching on `source`, so matching, notifications and the
+document pipeline never learn that a new portal exists.
 
 ```
 fetch -> normalise -> validate -> hash -> insert/update -> report changed ids
 ```
+
+### Not every announcement is a job
+
+กรมที่ดิน files recruitment under a general HR-news category that is mostly *not* openings:
+eligibility lists, results, calls to report for duty. Every row we insert is handed to the
+matching queue and can become an email, so `DolParser` keeps only titles that mean
+"applications are open now", by **positive match** — a negative list fails open, and a
+phrasing nobody anticipated would become a spurious job and a spurious email. Rejected
+entries are counted in `skippedJobs` on the run row rather than dropped silently, which is
+what makes the list reviewable: on a live crawl that reads `found=20, new=1, skipped=19` for
+DOL and `found=30, new=5, skipped=25` for MDES.
+
+The predicate lives in `crawler/recruitment-title.ts`, shared: it is about Thai announcement
+phrasing, not about any one portal. Each source's spec asserts it against that source's own
+captured titles.
+
+### Two spellings of ำ
+
+Thai portals write SARA AM either as `ำ` (U+0E33) or as NIKHAHIT + SARA AA (U+0E4D U+0E32).
+**MDES uses both on a single listing page** — 7 of 15 titles. The two look identical to a
+reader and are different strings to Postgres, so an alert whose keyword is `ดำรงตำแหน่ง`
+silently never matched half the announcements that plainly contain it.
+
+`ำ` has **no canonical Unicode decomposition**, so `String.normalize()` in any form leaves the
+two-codepoint spelling alone and neither collation nor `ILIKE` can bridge it. It has to be an
+explicit substitution, and it is applied to both sides: `normalizeJobText` canonicalises every
+free-text field before the content hash is computed, and saved alert keywords go through the
+same function. One side alone leaves the mismatch intact in the other direction.
+`NormalizeThaiText1790086389682` fixes rows written before this.
 
 Four properties the e2e suite pins:
 
@@ -161,14 +212,29 @@ SUCCESS with zero announcements — indistinguishable from every job closing at 
 ### Triggering
 
 ```bash
-curl -X POST -H "x-internal-api-key: $INTERNAL_API_KEY" \
-  http://localhost:3001/api/v1/internal/crawler/run
+B=http://localhost:3001/api/v1/internal/crawler
+H="x-internal-api-key: $INTERNAL_API_KEY"
+
+curl -X POST -H "$H" "$B/run"        # OCSC — the legacy alias the deployed cron calls
+curl -X POST -H "$H" "$B/run/OCSC"   # one named source (case-insensitive)
+curl -X POST -H "$H" "$B/run/DOL"
+curl -X POST -H "$H" "$B/run-all"    # every registered source, in sequence
 ```
 
-Returns 200 with the summary even when the crawl failed (the run row carries the error);
-409 means one was already in flight. In deployment `.github/workflows/crawl.yml` calls it on
-a schedule — see Deployment. Locally, `CRAWLER_SCHEDULER_ENABLED=true` runs it in-process
-every `OCSC_CRAWL_INTERVAL_MINUTES` instead.
+`run` and `run/:source` return 200 with the summary even when the crawl failed (the run row
+carries the error); 409 means one was already in flight. `run/:source` answers 400 for a
+string that is not a `JobSource` and 404 for a real source whose crawler has not shipped
+yet — the enum is a database type, so its values run ahead of the code.
+
+`run-all` always answers 200: the body carries `failed` and `skipped` counts, and one source
+failing or already running never stops the others. A caller that wants to go red on a
+partial failure reads those counts.
+
+In deployment `.github/workflows/crawl.yml` calls `run` on a schedule — see Deployment. It
+stays on the legacy alias until there is a second source worth crawling; switching it to
+`run-all` is a one-line, separately revertible change. Locally,
+`CRAWLER_SCHEDULER_ENABLED=true` runs every registered source in-process each
+`CRAWLER_INTERVAL_MINUTES` instead.
 
 ## Authentication
 
@@ -221,10 +287,127 @@ the flow needs the email module in step 11.
   soft delete would leave the row in place and re-saving that job would fail on the unique
   index *permanently*. The e2e suite saves, unsaves and saves again for exactly this reason.
 
+## Document processing
+
+Announcements carry their real detail in a PDF, so every attachment a crawl imports is handed
+to the `document-processing` queue and read out of band. The crawl does not wait for it: a PDF
+takes seconds, can fail on its own, and a document that cannot be read must not make the run
+FAILED.
+
+```
+attachment (PENDING) -> download -> SHA-256 -> text layer -> status
+```
+
+**The branch that matters is whether the PDF has a text layer at all.** MDES publishes
+born-digital announcements — 15 pages, ~32k characters, read in ~130ms. DOL publishes
+*scans*: a 20-page, 13.8 MB document that yields **zero** usable characters. Both are normal.
+
+| Status | Means |
+| --- | --- |
+| `PENDING` | Imported, not yet read. |
+| `COMPLETED` | Text layer read, and there was enough of it. |
+| `INSUFFICIENT_TEXT` | Parsed fine; no usable text layer. A scan. |
+| `FAILED` | Could not fetch or parse it; `extraction_error` says why. |
+
+`INSUFFICIENT_TEXT` is named for what happened, not for what to do about it. Calling a scan
+`COMPLETED` would be a lie and `FAILED` would be wrong — nothing broke. OCR picks its work up
+with a single predicate on that value, which is why the column is indexed.
+
+A few things the pipeline is careful about:
+
+- **Size is capped twice** — on the declared `content-length`, and again while reading, since
+  that header is a claim rather than a guarantee. The process reading PDFs is the one serving
+  the API, on 512 MB; without the second check a source publishing a 200 MB scan takes the
+  instance down instead of failing one row.
+- **The magic bytes decide what a document is**, not the URL or the header. MDES serves
+  attachments from an extensionless `content/download-detail/{id}`, and a site answering an
+  HTML error page with `200 application/pdf` is the case this actually catches.
+- **`file_hash` is SHA-256 of the bytes.** Sources republish one file across several
+  announcements, so a document already read is copied rather than parsed again. `FAILED`
+  results are never copied — a failure is usually about the fetch, not the file, and copying
+  one would turn a network blip into a permanent verdict on every announcement sharing it.
+- **Extracted text is canonicalised** exactly as titles are. PDF text carries the same two
+  spellings of `ำ`; text that will be searched has to be comparable to what a user typed.
+- **Concurrency 1.** Each queue holds a LISTEN client plus a pool against the same Supabase
+  instance the API uses, and this is the only worker that also holds a whole PDF in memory.
+
+**Re-processing** is `UPDATE job_attachment SET extraction_status = 'PENDING' WHERE …`;
+the next crawl picks it up. The sweep is deliberately *not* scoped to the announcements a
+crawl changed — an attachment is unread for reasons unrelated to its announcement moving, and
+scoping it that way left those unread forever because their announcements never change again.
+It is capped per crawl (`DOCUMENT_BATCH_SIZE`), so the first run after deploy drains a batch
+rather than every attachment at once.
+
+### Thai text in PDFs is not the text you think it is
+
+Thai PDFs are produced with fonts that place tone marks and vowels at **Private Use Area**
+codepoints (U+F700–U+F71A) so the glyph sits at the right height above a tall consonant. A
+text extractor reads exactly what the font says, so `ตำแหน่ง` arrives as `ตำแหน` + U+F70A +
+`ง`: a string that looks correct to a reader and matches nothing.
+
+Measured over the extracted corpus: **11,435 such characters across 11 of 12 documents**, and
+`ตำแหน่ง` occurs 39 times before translation and **533** after. `normalizeThaiText` maps the
+block, so every Thai word carrying a tone mark is searchable.
+
+### Matching against document text is off, on evidence
+
+Requirement 25 asks for alert keywords to be matched against extracted document text. It is
+implemented, tested and **disabled** (`DOCUMENT_MATCH_TEXT=false`), because measuring it on
+the live corpus showed it makes matching worse:
+
+- **OCSC splits a multi-position announcement into one job row per position**, all sharing one
+  PDF. Of 9 extra matches the widened haystack produced, **9 were positions that already had
+  their own row** — nothing new was found, and a reader searching one position would be
+  emailed about the four they did not search for.
+- **Generic keywords stop discriminating.** `ปริญญาตรี` matches 0 announcements by title and
+  11 of the 12 with document text, because every announcement states an education requirement.
+
+The picture changes for a source that does not split by position — DOL and MDES publish one
+row per announcement, where the PDF is the only place the positions are listed. The switch is
+there for when those sources carry enough of the corpus to matter.
+
+When it is on, reading a document re-queues its announcement for matching. That trigger is
+not optional: `extracted_text` is deliberately not part of `content_hash`, so extraction never
+makes an announcement look changed, and the crawl's matching pass runs before the text exists.
+
+**Not yet done, deliberately:** nothing reads the extracted text back into the job, so
+`application_start` / `application_end` stay null for DOL and MDES — the dates live in the
+PDF prose and parsing them is its own problem.
+
 ## Job alerts and matching
 
 CRUD plus `POST /job-alerts/:id/pause|resume`. An alert another user owns is a **404**, not a
 403 — a 403 would confirm the id exists.
+
+### Who an alert can be addressed to
+
+**Only the account that owns it.** `notificationEmail` is not settable through the API: it is
+written from `user.email` on create, the field is absent from the DTOs so `whitelist: true`
+strips it, and the account's own address is not editable either
+(`AuthService.updateProfile`), so the stored address cannot drift afterwards.
+
+The earlier behaviour let a client name any recipient. That let anyone have a stranger mailed
+announcements they never asked for and — having no account — could not stop, which is someone
+else's personal data being processed with no basis for it. `AlertUnsubscribe1790083599925`
+resets any existing row whose address is not its owner's.
+
+### Unsubscribing without an account
+
+Every alert carries a 32-byte `unsubscribe_token`, generated in the entity's `@BeforeInsert`
+so no code path can create an alert that cannot be switched off. It appears as a link in the
+email and in the `List-Unsubscribe` / `List-Unsubscribe-Post` headers, which is what makes a
+mail client show its own unsubscribe button — a footer link alone does not, and Gmail and
+Yahoo have required one-click for bulk senders since 2024.
+
+**`GET` renders a confirmation page and changes nothing; `POST` is what unsubscribes.** Mail
+clients, link scanners and corporate security gateways follow links in email with GET,
+unprompted — if GET unsubscribed, a scanner opening the message would silently switch a
+user's alerts off. `POST` is also the RFC 8058 one-click target.
+
+Unsubscribing pauses (`is_active = false`) rather than deletes, so the owner keeps the saved
+search and its match history. An unknown, empty or malformed token is a flat **404** — the
+endpoint is public, and distinguishing "well-formed but unknown" would make it an oracle for
+probing tokens. The default throttle is deliberately left on.
 
 Matching runs at the end of each crawl, over exactly the announcements that were inserted or
 materially changed, never the whole table. One query per announcement decides which alerts it
@@ -279,8 +462,8 @@ are already notified, so an ordinary BullMQ retry after a successful send sends 
 
 ### Frequencies
 
-- **IMMEDIATE** — the matching processor queues one email per new match, keyed
-  `email--<matchId>`.
+- **IMMEDIATE** — one email per **announcement**, not per match, keyed on a hash of the set
+  of matches it covers (`email--<sha256 of the sorted match ids>`).
 - **DAILY / WEEKLY** — matches sit unnotified until a digest run collects them into one email
   per alert, keyed `digest--<alertId>--<periodKey>` where the period is the Bangkok date or
   the ISO week. A cron that fires twice in one period still produces one digest.
@@ -291,6 +474,36 @@ and a daily digest that only fires when someone happens to be browsing is not a 
 `.github/workflows/crawl.yml` calls it after each crawl, with the weekly variant on Mondays.
 
 `JobAlert.lastSentAt` is written on every send, immediate or digest.
+
+### One announcement, one email
+
+OCSC publishes a multi-position recruitment as **one job row per position**, every row
+carrying the same PDF — 7 documents across 38 of the 54 rows currently stored. An alert
+matching three of those positions used to send three emails about one announcement.
+
+Immediate matches are therefore grouped before queueing: two matches belong to the same
+announcement when their jobs share an **attachment URL**, and each group becomes one email
+listing every position it matched.
+
+- **The URL, not `file_hash`.** The hash only exists once the document has been downloaded,
+  which happens on a queue *after* matching — so it is reliably null at exactly the moment a
+  fresh announcement is emailed. Both give identical grouping on the corpus (7 groups, 38
+  rows), and mixing them would be worse than either: mid-extraction some attachments of one
+  announcement have a hash and others do not, so they would split.
+- **Grouping is not transitive.** A job is grouped by its first attachment URL alone, so
+  A-shares-with-B and B-shares-with-C never merges A and C.
+- **A job with no attachment is its own announcement**, which is the previous behaviour
+  exactly — sources that publish one row per announcement are unaffected.
+
+The email's job id hashes the *set* of matches rather than the announcement, which is what
+keeps a position that matches later from being swallowed: matching runs per announcement at
+concurrency 4, so the positions of one announcement routinely arrive in separate dispatch
+calls, and an id keyed on (alert, announcement) would make the second one a silent duplicate.
+`email-queue.e2e-spec.ts` pins that case.
+
+**Digests are deliberately untouched.** They already send one email per alert, so there is no
+duplicate to remove — and collapsing several matched positions into one line would drop
+information the reader wants.
 
 ### Job ids cannot contain `:`
 
@@ -405,7 +618,7 @@ Render (API) · Supabase (Postgres, also the queue) · Upstash (cache, optional)
 Render's free web service sleeps when idle, so an in-process cron cannot be relied on
 there: leave `CRAWLER_SCHEDULER_ENABLED=false` and drive crawls from an external scheduler
 that calls the authenticated internal endpoint (which also wakes the instance).
-`OCSC_CRAWL_INTERVAL_MINUTES` stays the knob either way.
+`CRAWLER_INTERVAL_MINUTES` stays the knob either way.
 
 Supabase gotchas, all three of which will bite once:
 
@@ -455,7 +668,9 @@ test in the file.
 - Postgres ends up with three structurally identical `*_source_enum` types, one per table
   that stores a `JobSource`. A single shared type is what you would write by hand, but
   TypeORM re-emits `CREATE TYPE` once per entity for it and every generated migration then
-  needs editing. Adding a source means regenerating, which updates all three.
+  needs editing. Adding a source means widening all three in step — see
+  `MultiSourceEnums1790079845524`, which does it by hand because `ALTER TYPE ... ADD VALUE`
+  is not something `migration:generate` emits.
 - A full crawl takes ~18s cold and ~7s warm against Supabase in Singapore, because
   `persist()` does a lookup, a write and an attachment reconcile per announcement — roughly
   350 round trips at ~46ms each. Fine at 51 announcements and the obvious thing to batch if

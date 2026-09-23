@@ -68,8 +68,11 @@ export class JobAlertsService {
 			jobTypes: dto.jobTypes ?? [],
 			educations: dto.educations ?? [],
 			provinces: dto.provinces ?? [],
-			// Defaulting to the account's address means the common case needs no input.
-			notificationEmail: dto.notificationEmail ?? user.email,
+			// The owner's address, always — see the note on `CreateJobAlertDto`. A client that
+			// could name the recipient could mail a stranger who has no way to stop it.
+			notificationEmail: user.email,
+			// `unsubscribeToken` is filled by the entity's @BeforeInsert, so every alert has one
+			// however it was created.
 			frequency: dto.frequency,
 			isActive: true,
 			// The floor: only announcements discovered from now on can ever match.
@@ -100,7 +103,6 @@ export class JobAlertsService {
 			jobTypes: dto.jobTypes ?? alert.jobTypes,
 			educations: dto.educations ?? alert.educations,
 			provinces: dto.provinces ?? alert.provinces,
-			notificationEmail: dto.notificationEmail ?? alert.notificationEmail,
 			frequency: dto.frequency ?? alert.frequency,
 			isActive: dto.isActive ?? alert.isActive,
 		});

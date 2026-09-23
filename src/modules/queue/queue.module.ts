@@ -1,6 +1,7 @@
 import configuration from "@/config/configuration";
 import {
 	DEFAULT_JOB_OPTIONS,
+	QUEUE_DOCUMENT_PROCESSING,
 	QUEUE_EMAIL_NOTIFICATION,
 	QUEUE_JOB_MATCHING,
 	QUEUE_OCSC_CRAWLER,
@@ -59,7 +60,8 @@ setDefaultBackendFactory(createPostgresBackend);
 			{ name: QUEUE_JOB_MATCHING },
 			// Registered for producing only. Step 11 adds the processor — a worker with an
 			// empty handler would silently acknowledge real work.
-			{ name: QUEUE_EMAIL_NOTIFICATION }
+			{ name: QUEUE_EMAIL_NOTIFICATION },
+			{ name: QUEUE_DOCUMENT_PROCESSING }
 		),
 	],
 	exports: [BullModule],

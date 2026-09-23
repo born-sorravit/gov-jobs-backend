@@ -1,13 +1,13 @@
 import { PaginationDto } from "@/shared/dto/pagination.dto";
 import { toNumberArray } from "@/shared/dto/transform.util";
 import { AlertFrequency } from "@/shared/enums/alert-frequency.enum";
+import { normalizeThaiText } from "@/shared/utils/thai-text.util";
 import { ApiProperty, ApiPropertyOptional, PartialType } from "@nestjs/swagger";
 import { Transform } from "class-transformer";
 import {
 	ArrayMaxSize,
 	IsArray,
 	IsBoolean,
-	IsEmail,
 	IsEnum,
 	IsInt,
 	IsOptional,
@@ -40,9 +40,20 @@ export class CreateJobAlertDto {
 	@ArrayMaxSize(MAX_KEYWORDS)
 	@IsString({ each: true })
 	@MaxLength(120, { each: true })
+	// Normalised here, not only at match time: Thai spells `ำ` two ways that look identical
+	// and compare unequal, and a keyword saved in one spelling would silently never match
+	// announcements published in the other. Announcement text is normalised the same way, so
+	// both sides of the comparison agree. De-duplication runs *after*, or the two spellings
+	// of one word would survive as two keywords.
 	@Transform(({ value }) =>
 		Array.isArray(value)
-			? [...new Set(value.map((entry) => String(entry).trim()).filter(Boolean))]
+			? [
+					...new Set(
+						value
+							.map((entry) => normalizeThaiText(String(entry)).trim())
+							.filter(Boolean)
+					),
+				]
 			: value
 	)
 	keywords?: string[];
@@ -80,14 +91,18 @@ export class CreateJobAlertDto {
 	@Transform(toNumberArray)
 	provinces?: number[];
 
-	@ApiPropertyOptional({ description: "Defaults to the account's email" })
-	@IsOptional()
-	@IsEmail()
-	@MaxLength(255)
-	@Transform(({ value }) =>
-		typeof value === "string" ? value.trim().toLowerCase() : value
-	)
-	notificationEmail?: string;
+	/**
+	 * Deliberately **not** settable.
+	 *
+	 * An alert is always delivered to the address of the account that owns it. When the client
+	 * could choose, anyone could enter a stranger's address and mail them announcements they
+	 * never asked for and — having no account — could not stop. That is someone else's
+	 * personal data being processed without a basis for it, and it is the reason the field is
+	 * gone rather than merely validated: a field that does not exist cannot be abused.
+	 *
+	 * The account's own email is not editable either (`AuthService.updateProfile`), so the
+	 * stored address cannot drift away from the owner afterwards.
+	 */
 
 	@ApiPropertyOptional({ enum: AlertFrequency, default: AlertFrequency.IMMEDIATE })
 	@IsOptional()
@@ -115,7 +130,8 @@ export class JobAlertResponse {
 	@ApiProperty({ type: [Number] }) jobTypes: number[];
 	@ApiProperty({ type: [Number] }) educations: number[];
 	@ApiProperty({ type: [Number] }) provinces: number[];
-	@ApiProperty() notificationEmail: string;
+	@ApiProperty({ description: "Always the owner account's email; not settable." })
+	notificationEmail: string;
 	@ApiProperty({ enum: AlertFrequency }) frequency: AlertFrequency;
 	@ApiProperty() isActive: boolean;
 	@ApiProperty({

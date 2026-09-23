@@ -1,5 +1,4 @@
 import { CrawlerService } from "@/modules/crawler/crawler.service";
-import { JobSource } from "@/shared/enums/job-source.enum";
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { SchedulerRegistry } from "@nestjs/schedule";
@@ -37,20 +36,17 @@ export class CrawlerScheduler implements OnModuleInit {
 
 		const minutes = Math.max(
 			1,
-			this.configService.get<number>("crawler.ocsc.crawlIntervalMinutes", 60)
+			this.configService.get<number>("crawler.intervalMinutes", 60)
 		);
 
 		const job = new CronJob(`0 */${minutes} * * * *`, () => {
-			void this.crawlerService
-				.run(JobSource.OCSC, "scheduler")
-				// `run` already swallows crawl failures; this catches the 409 raised when a
-				// previous crawl is still in flight, which is expected, not exceptional.
-				.catch((error: Error) =>
-					this.logger.warn(`Scheduled crawl skipped: ${error.message}`)
-				);
+			// `runAll` rather than a hardcoded OCSC crawl: it absorbs both a crawl failure and
+			// an overlapping run per source, so there is nothing left for a `.catch` here, and
+			// a new source starts being scheduled the moment it is registered.
+			void this.crawlerService.runAll("scheduler");
 		});
 
-		this.schedulerRegistry.addCronJob("ocsc-crawl", job);
+		this.schedulerRegistry.addCronJob("source-crawl", job);
 		job.start();
 		this.logger.log(
 			`In-process crawl scheduler enabled: every ${minutes} minute(s)`

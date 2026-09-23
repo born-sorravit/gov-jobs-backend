@@ -12,6 +12,11 @@ export interface JobAlertEmailInput {
 	labels: Map<string, ReferenceItem>;
 	webUrl: string;
 	manageUrl: string;
+	/**
+	 * One-click off, for this alert, without an account. The same URL goes in the
+	 * `List-Unsubscribe` header so a mail client can offer its own button.
+	 */
+	unsubscribeUrl: string;
 }
 
 const COPY = {
@@ -32,8 +37,14 @@ const COPY = {
 		viewSource: "ดูประกาศต้นทาง",
 		viewOnSite: "ดูรายละเอียดบนเว็บไซต์",
 		manage: "จัดการการแจ้งเตือน",
+		unsubscribe: "ยกเลิกการแจ้งเตือนนี้",
+		// Says what this is and what it is not. The previous wording named one agency, which
+		// read as though the mail came from them — and stopped being true the moment a second
+		// source was added.
 		footer:
-			"อีเมลนี้ส่งจากระบบรวบรวมประกาศสาธารณะของสำนักงาน ก.พ. กรุณายึดประกาศต้นฉบับเป็นหลัก",
+			"อีเมลนี้ส่งเพราะคุณตั้งการแจ้งเตือนไว้ในบัญชีของคุณ · " +
+			"GovScout เป็นระบบอิสระที่รวบรวมประกาศสาธารณะจากเว็บไซต์ของหน่วยงานราชการ " +
+			"ไม่ใช่ระบบของหน่วยงานราชการใด กรุณายึดประกาศต้นฉบับเป็นหลัก",
 		unspecified: "ไม่ระบุ",
 	},
 	en: {
@@ -53,8 +64,11 @@ const COPY = {
 		viewSource: "View the original announcement",
 		viewOnSite: "See details on the site",
 		manage: "Manage your alerts",
+		unsubscribe: "Unsubscribe from this alert",
 		footer:
-			"Compiled from OCSC's public announcements. The original announcement is authoritative.",
+			"You are receiving this because you created an alert on your account. " +
+			"GovScout is an independent aggregator of public announcements from Thai government " +
+			"websites, not a government service. The original announcement is authoritative.",
 		unspecified: "Not specified",
 	},
 } as const;
@@ -163,7 +177,12 @@ export const buildText = (input: JobAlertEmailInput): string => {
 		lines.push("");
 	}
 
-	lines.push(`${copy.manage}: ${input.manageUrl}`, "", copy.footer);
+	lines.push(
+		`${copy.manage}: ${input.manageUrl}`,
+		`${copy.unsubscribe}: ${input.unsubscribeUrl}`,
+		"",
+		copy.footer
+	);
 	return lines.join("\n");
 };
 
@@ -202,6 +221,8 @@ export const buildHtml = (input: JobAlertEmailInput): string => {
 		${cards}
 		<p style="margin:20px 0 0;font-size:13px">
 			<a href="${escapeHtml(input.manageUrl)}" style="color:#4f46e5">${escapeHtml(copy.manage)}</a>
+			<span style="color:#9ca3af"> · </span>
+			<a href="${escapeHtml(input.unsubscribeUrl)}" style="color:#4f46e5">${escapeHtml(copy.unsubscribe)}</a>
 		</p>
 		<p style="margin:12px 0 0;color:#6b7280;font-size:12px;line-height:1.6">${escapeHtml(copy.footer)}</p>
 	</div>

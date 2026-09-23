@@ -4,6 +4,8 @@ import { JobMatchingProcessor } from "@/modules/job-alerts/job-matching.processo
 import { NotificationsModule } from "@/modules/notifications/notifications.module";
 import { JobAlertsController } from "@/modules/job-alerts/job-alerts.controller";
 import { JobAlertsService } from "@/modules/job-alerts/job-alerts.service";
+import { UnsubscribeController } from "@/modules/job-alerts/unsubscribe.controller";
+import { UnsubscribeService } from "@/modules/job-alerts/unsubscribe.service";
 import { BullModule } from "@nestjs/bullmq";
 import { Module } from "@nestjs/common";
 
@@ -12,8 +14,13 @@ import { Module } from "@nestjs/common";
 		NotificationsModule,
 		BullModule.registerQueue({ name: QUEUE_JOB_MATCHING }),
 	],
-	controllers: [JobAlertsController],
-	providers: [JobAlertsService, AlertMatchingService, JobMatchingProcessor],
+	controllers: [JobAlertsController, UnsubscribeController],
+	providers: [
+		JobAlertsService,
+		UnsubscribeService,
+		AlertMatchingService,
+		JobMatchingProcessor,
+	],
 	// The crawler runs matching after each import; step 10 moves that behind a queue.
 	exports: [JobAlertsService, AlertMatchingService],
 })

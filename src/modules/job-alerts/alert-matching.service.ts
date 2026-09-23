@@ -4,7 +4,10 @@ import { JobAlertMatchRepository } from "@/models/job-alerts/job-alert-match.rep
 import { JobAlertRepository } from "@/models/job-alerts/job-alert.repository";
 import { Job } from "@/models/jobs/entities/job.entity";
 import { JobRepository } from "@/models/jobs/job.repository";
+import { DocumentConfig } from "@/config/configuration";
+import { ExtractionStatus } from "@/shared/enums/extraction.enum";
 import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { In } from "typeorm";
 
 /**
@@ -14,15 +17,49 @@ import { In } from "typeorm";
 const escapeLike = (value: string): string =>
 	value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 
+/**
+ * Everything an alert's keywords are matched against.
+ *
+ * Title and agency come from the listing; the rest is the announcement itself. An
+ * announcement routinely advertises several positions and names only one in its title — the
+ * DOL and OCSC corpus has announcements titled `นักจัดการงานทั่วไป` whose PDF also recruits a
+ * `นักทรัพยากรบุคคล` — so a reader searching for the second position would never hear about
+ * it from the title alone.
+ *
+ * Only `COMPLETED` documents contribute. An `INSUFFICIENT_TEXT` row holds a few characters of
+ * header junk kept as evidence for that verdict, which is noise rather than signal.
+ */
+export const buildHaystack = (job: Job, includeDocuments: boolean): string =>
+	[
+		job.title,
+		job.agency,
+		job.description ?? "",
+		...(includeDocuments ? (job.attachments ?? []) : [])
+			.filter(
+				(attachment) =>
+					attachment.extractionStatus === ExtractionStatus.COMPLETED &&
+					attachment.extractedText
+			)
+			.map((attachment) => attachment.extractedText as string),
+	]
+		.filter((part) => part !== "")
+		.join("\n");
+
 @Injectable()
 export class AlertMatchingService {
 	private readonly logger = new Logger(AlertMatchingService.name);
 
+	private readonly matchDocumentText: boolean;
+
 	constructor(
 		private readonly jobRepository: JobRepository,
 		private readonly jobAlertRepository: JobAlertRepository,
-		private readonly jobAlertMatchRepository: JobAlertMatchRepository
-	) {}
+		private readonly jobAlertMatchRepository: JobAlertMatchRepository,
+		configService: ConfigService
+	) {
+		this.matchDocumentText =
+			configService.getOrThrow<DocumentConfig>("document").matchDocumentText;
+	}
 
 	/**
 	 * Records a match for every active alert each of these announcements satisfies.
@@ -36,7 +73,12 @@ export class AlertMatchingService {
 	async matchJobs(jobIds: string[]): Promise<string[]> {
 		if (jobIds.length === 0) return [];
 
-		const jobs = await this.jobRepository.find({ where: { id: In(jobIds) } });
+		const jobs = await this.jobRepository.find({
+			where: { id: In(jobIds) },
+			// The announcement's documents are part of what an alert matches against — see
+			// `buildHaystack`.
+			relations: { attachments: true },
+		});
 		const createdIds: string[] = [];
 
 		for (const job of jobs) {
@@ -95,8 +137,7 @@ export class AlertMatchingService {
 				)`,
 					// Substring matching, because Thai has no word boundaries: the spec's own
 					// example is "นักวิชาการคอมพิวเตอร์" matching "นักวิชาการคอมพิวเตอร์ปฏิบัติการ".
-					// Agency is included because keywords are the only free-text an alert has.
-					{ haystack: `${job.title}\n${job.agency}` }
+					{ haystack: buildHaystack(job, this.matchDocumentText) }
 				)
 				.andWhere(
 					// A null position type is "unspecified", not "none" — treated as matching any

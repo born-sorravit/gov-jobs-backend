@@ -1,4 +1,4 @@
-import { AppConfig } from "@/config/configuration";
+import { AppConfig, MailConfig } from "@/config/configuration";
 import {
 	EmailJobPayload,
 	QUEUE_EMAIL_NOTIFICATION,
@@ -78,15 +78,27 @@ export class EmailNotificationProcessor extends WorkerHost {
 		}
 
 		const app = this.configService.getOrThrow<AppConfig>("app");
+		const mail = this.configService.getOrThrow<MailConfig>("mail");
 		const locale: EmailLocale = alert.user?.locale === "en" ? "en" : "th";
+		const webUrl = app.publicWebUrl.replace(/\/$/, "");
+
+		// Points at the API, not the web app: the link has to keep working even if the
+		// frontend is down or redeployed, because an unsubscribe that 404s is the complaint
+		// this whole mechanism exists to prevent.
+		// `apiPrefix` and the URI version are composed rather than hardcoded, so the link
+		// follows the routing rather than quietly rotting if API_PREFIX ever changes.
+		const unsubscribeUrl =
+			`${app.publicApiUrl.replace(/\/$/, "")}/${app.apiPrefix}/v1/alerts/unsubscribe` +
+			`?token=${encodeURIComponent(alert.unsubscribeToken)}`;
 
 		const input = {
 			locale,
 			alertName: alert.name,
 			jobs,
 			labels: await this.loadLabels(),
-			webUrl: app.publicWebUrl.replace(/\/$/, ""),
-			manageUrl: `${app.publicWebUrl.replace(/\/$/, "")}/alerts`,
+			webUrl,
+			manageUrl: `${webUrl}/alerts`,
+			unsubscribeUrl,
 		};
 
 		await this.emailService.send({
@@ -97,6 +109,7 @@ export class EmailNotificationProcessor extends WorkerHost {
 			template: `job-alert-${kind}`,
 			jobAlertId: alert.id,
 			userId: alert.userId,
+			headers: this.unsubscribeHeaders(unsubscribeUrl, mail.replyTo),
 		});
 
 		const now = new Date();
@@ -110,6 +123,28 @@ export class EmailNotificationProcessor extends WorkerHost {
 			`Sent ${kind} alert "${alert.name}" with ${jobs.length} announcement(s)`
 		);
 		return { sent: jobs.length };
+	}
+
+	/**
+	 * What makes a mail client show its own "Unsubscribe" button next to the sender.
+	 *
+	 * Both headers are required: `List-Unsubscribe` alone is ignored by Gmail for one-click,
+	 * and `List-Unsubscribe-Post` is what promises the URL can be POSTed to without the user
+	 * having to visit a page (RFC 8058). A `mailto:` is offered alongside when a reply-to
+	 * exists, for clients that prefer it.
+	 */
+	private unsubscribeHeaders(
+		url: string,
+		replyTo: string | undefined
+	): Record<string, string> {
+		const targets = replyTo
+			? `<${url}>, <mailto:${replyTo}?subject=unsubscribe>`
+			: `<${url}>`;
+
+		return {
+			"List-Unsubscribe": targets,
+			"List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+		};
 	}
 
 	/** Taxonomy labels keyed `${kind}:${externalId}`, so the template can resolve ids. */

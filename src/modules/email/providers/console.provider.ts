@@ -18,8 +18,15 @@ export class ConsoleEmailProvider implements EmailProvider {
 	private readonly logger = new Logger(ConsoleEmailProvider.name);
 
 	async send(message: EmailMessage): Promise<EmailSendResult> {
+		// Headers are logged too: without them there is no way to tell locally whether
+		// `List-Unsubscribe` was actually set, and "it looked fine in dev" is how that header
+		// goes missing in production.
+		const headers = Object.entries(message.headers ?? {})
+			.map(([name, value]) => `\n  ${name}: ${value}`)
+			.join("");
+
 		this.logger.log(
-			`[email] to=${message.to} subject=${message.subject}\n${message.text.slice(0, 800)}`
+			`[email] to=${message.to} subject=${message.subject}${headers}\n${message.text.slice(0, 800)}`
 		);
 		return { providerMessageId: `console-${randomUUID()}` };
 	}

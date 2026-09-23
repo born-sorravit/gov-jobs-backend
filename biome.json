@@ -14,7 +14,8 @@
 			"!**/docker",
 			"!**/node_modules",
 			"!**/public",
-			"!**/globals.css"
+			"!**/globals.css",
+			"!**/test/fixtures"
 		]
 	},
 	"formatter": {
@@ -28,7 +29,8 @@
 			"!**/docker",
 			"!**/node_modules",
 			"!**/public",
-			"!**/globals.css"
+			"!**/globals.css",
+			"!**/test/fixtures"
 		]
 	},
 	"linter": {
@@ -89,7 +91,8 @@
 			"!**/docker",
 			"!**/node_modules",
 			"!**/public",
-			"!**/globals.css"
+			"!**/globals.css",
+			"!**/test/fixtures"
 		]
 	},
 	"javascript": {

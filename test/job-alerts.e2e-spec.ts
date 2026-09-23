@@ -124,6 +124,59 @@ describe("job alerts", () => {
 			});
 		});
 
+		/**
+		 * The gap this closed: the API used to let a client name any recipient, so anyone could
+		 * have a stranger mailed announcements they never asked for and — having no account —
+		 * could not stop. The field is gone from the DTO, so `whitelist: true` strips it.
+		 */
+		it("ignores a notification email supplied by the client", async () => {
+			const token = await signUp("recipient");
+
+			const { body } = await api(token)
+				.post("/job-alerts", {
+					...VALID,
+					notificationEmail: `stranger${DOMAIN}`,
+				})
+				.expect(201);
+
+			expect(body.data.notificationEmail).toBe(`recipient${DOMAIN}`);
+
+			const stored = await dataSource
+				.getRepository(JobAlert)
+				.findOneByOrFail({ id: body.data.id });
+			expect(stored.notificationEmail).toBe(`recipient${DOMAIN}`);
+		});
+
+		it("cannot be redirected to a stranger by a later edit either", async () => {
+			const token = await signUp("noredirect");
+			const { body } = await api(token).post("/job-alerts", VALID).expect(201);
+
+			await api(token)
+				.patch(`/job-alerts/${body.data.id}`, {
+					notificationEmail: `stranger${DOMAIN}`,
+				})
+				.expect(200);
+
+			const stored = await dataSource
+				.getRepository(JobAlert)
+				.findOneByOrFail({ id: body.data.id });
+			expect(stored.notificationEmail).toBe(`noredirect${DOMAIN}`);
+		});
+
+		it("gives every alert an unsubscribe token", async () => {
+			const token = await signUp("token");
+			const { body } = await api(token).post("/job-alerts", VALID).expect(201);
+
+			const stored = await dataSource
+				.getRepository(JobAlert)
+				.findOneByOrFail({ id: body.data.id });
+
+			expect(stored.unsubscribeToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+			// Never exposed to the client — it is a bearer secret, and the owner does not need
+			// it to manage their own alert.
+			expect(body.data).not.toHaveProperty("unsubscribeToken");
+		});
+
 		it("sets the matching floor to now, so the archive is never replayed", async () => {
 			const token = await signUp("floor");
 			const before = Date.now();
@@ -147,7 +200,6 @@ describe("job alerts", () => {
 
 		it.each([
 			["a missing name", { name: "" }],
-			["a malformed notification email", { notificationEmail: "not-an-email" }],
 			["an unknown frequency", { frequency: "HOURLY" }],
 			[
 				"too many keywords",

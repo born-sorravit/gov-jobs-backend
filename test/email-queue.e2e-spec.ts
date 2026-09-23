@@ -2,6 +2,10 @@ import { AppModule } from "@/app.module";
 import { QUEUE_EMAIL_NOTIFICATION } from "@/constants/queue.constants";
 import { EmailLog } from "@/models/email/entities/email-log.entity";
 import { JobAlertMatch } from "@/models/job-alerts/entities/job-alert-match.entity";
+import {
+	JobAttachment,
+	JobAttachmentType,
+} from "@/models/jobs/entities/job-attachment.entity";
 import { JobAlert } from "@/models/job-alerts/entities/job-alert.entity";
 import { Job } from "@/models/jobs/entities/job.entity";
 import { User } from "@/models/users/entities/user.entity";
@@ -178,6 +182,122 @@ describe("email queue", () => {
 			await dataSource.getRepository(User).delete({ email: Like(`%${DOMAIN}`) });
 		}
 		await app?.close();
+	});
+
+	/**
+	 * OCSC publishes a multi-position recruitment as one job row per position, every one
+	 * carrying the same PDF — 7 documents across 38 of 54 rows in the live corpus. Before
+	 * grouping, an alert matching three of those positions sent three emails about one
+	 * announcement.
+	 */
+	describe("one announcement, one email", () => {
+		const PDF = "https://job.ocsc.go.th/upload2/shared-announcement.pdf";
+
+		/** Gives the first `count` fixture jobs the same attachment, as OCSC does. */
+		const shareOnePdf = async (count: number): Promise<void> => {
+			const repo = dataSource.getRepository(JobAttachment);
+			await repo.delete({ jobId: In(jobIds.slice(0, count)) });
+			await repo.insert(
+				jobIds.slice(0, count).map((jobId) => ({
+					jobId,
+					name: "ประกาศรับสมัคร",
+					url: PDF,
+					type: JobAttachmentType.ANNOUNCEMENT_PDF,
+				}))
+			);
+		};
+
+		it("sends one email covering every matched position", async () => {
+			await shareOnePdf(3);
+			const alert = await makeAlert(AlertFrequency.IMMEDIATE);
+			const matches = await makeMatches(alert, 3);
+
+			expect(
+				await dispatch.dispatchImmediate(matches.map((match) => match.id))
+			).toBe(1);
+			await drain();
+
+			expect(provider.sent).toHaveLength(1);
+
+			// At-least-once still holds: every match the email covered is marked notified.
+			const stored = await dataSource
+				.getRepository(JobAlertMatch)
+				.find({ where: { id: In(matches.map((match) => match.id)) } });
+			expect(stored).toHaveLength(3);
+			for (const match of stored) {
+				expect(match.notifiedAt).not.toBeNull();
+			}
+		});
+
+		/**
+		 * Matching runs per announcement at concurrency 4, so the positions of one
+		 * announcement routinely arrive in separate dispatch calls. A job id keyed on
+		 * (alert, announcement) rather than on the match set would silently drop the second.
+		 */
+		it("still emails a position that arrives in a later dispatch", async () => {
+			await shareOnePdf(2);
+			const alert = await makeAlert(AlertFrequency.IMMEDIATE);
+			const [first] = await makeMatches(alert, 1);
+
+			expect(await dispatch.dispatchImmediate([first.id])).toBe(1);
+			await drain();
+			expect(provider.sent).toHaveLength(1);
+
+			// Offset, because the first job already has a match for this alert.
+			const [second] = await makeMatches(alert, 1, 1);
+			expect(await dispatch.dispatchImmediate([second.id])).toBe(1);
+			await drain();
+
+			expect(provider.sent).toHaveLength(2);
+			const stored = await dataSource
+				.getRepository(JobAlertMatch)
+				.findOneByOrFail({ id: second.id });
+			expect(stored.notifiedAt).not.toBeNull();
+		});
+
+		it("keeps announcements with different documents apart", async () => {
+			const repo = dataSource.getRepository(JobAttachment);
+			await repo.delete({ jobId: In(jobIds.slice(0, 2)) });
+			await repo.insert([
+				{
+					jobId: jobIds[0],
+					name: "ก",
+					url: `${PDF}?a`,
+					type: JobAttachmentType.ANNOUNCEMENT_PDF,
+				},
+				{
+					jobId: jobIds[1],
+					name: "ข",
+					url: `${PDF}?b`,
+					type: JobAttachmentType.ANNOUNCEMENT_PDF,
+				},
+			]);
+			const alert = await makeAlert(AlertFrequency.IMMEDIATE);
+			const matches = await makeMatches(alert, 2);
+
+			expect(
+				await dispatch.dispatchImmediate(matches.map((match) => match.id))
+			).toBe(2);
+			await drain();
+
+			expect(provider.sent).toHaveLength(2);
+		});
+
+		/** A source publishing one row per announcement has nothing to group on. */
+		it("is unchanged for announcements with no document", async () => {
+			await dataSource
+				.getRepository(JobAttachment)
+				.delete({ jobId: In(jobIds.slice(0, 2)) });
+			const alert = await makeAlert(AlertFrequency.IMMEDIATE);
+			const matches = await makeMatches(alert, 2);
+
+			expect(
+				await dispatch.dispatchImmediate(matches.map((match) => match.id))
+			).toBe(2);
+			await drain();
+
+			expect(provider.sent).toHaveLength(2);
+		});
 	});
 
 	describe("routing by frequency", () => {
